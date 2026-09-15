@@ -5,13 +5,18 @@ pragma solidity ^0.8.0;
  * @title IEquityMultiplier
  * @author LlamaRisk
  * @notice The per-issuer read behind which every tokenized equity multiplier is normalised.
- * @dev A tokenized equity's on-chain price is the price of the underlying share multiplied by an
- *      issuer-published multiplier that absorbs corporate actions: a 3-for-1 split takes it from
- *      1.0 to 3.0, a reinvested dividend nudges it up by the dividend's share of the price.
+ * @dev The multiplier absorbs corporate actions: a 3-for-1 split takes it from 1.0 to 3.0, a
+ *      reinvested dividend nudges it up by the dividend's share of the price.
  *
- *      Issuers expose this differently, so each gets a thin adapter implementing this interface
- *      and the pricing contract stays issuer-agnostic. Implementations must return the multiplier
- *      scaled to `multiplierDecimals()`, which is read once at construction and assumed constant.
+ *      This is a monitoring input, not a pricing one. The tokenized equity feeds already apply the
+ *      multiplier internally and publish the total return value of the token, so a consumer that
+ *      multiplied by it again would apply the same corporate action twice. What reading it
+ *      separately buys is visibility: the feed picks the multiplier up on its own schedule, and
+ *      between an issuer's write and the feed's next publication the two disagree.
+ *
+ *      Issuers expose the multiplier differently, so each gets a thin adapter implementing this
+ *      interface. Implementations must return it scaled to `multiplierDecimals()`, which is read
+ *      once at construction and assumed constant.
  */
 interface IEquityMultiplier {
   /**

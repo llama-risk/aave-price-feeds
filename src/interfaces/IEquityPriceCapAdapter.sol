@@ -10,8 +10,9 @@ import {IEquityMultiplier} from './IEquityMultiplier.sol';
 interface IEquityPriceCapAdapter is ICLSynchronicityPriceAdapter {
   /**
    * @notice Parameters to create the adapter
-   * @param assetToUsdAggregator Price feed for the underlying share (SHARE / USD)
-   * @param equityMultiplier Contract implementing the per-issuer multiplier read
+   * @param assetToUsdAggregator Tokenized equity feed (TOKEN / USD), already total-return
+   * @param equityMultiplier Contract implementing the per-issuer multiplier read, used only for
+   *        the cross-check in `getImpliedUnderlyingPrice`
    * @param aclManager ACL manager of the pool, gates the bound setter
    * @param referenceUpdater Address allowed to advance the reference price, address(0) to disable
    * @param maxDeviationBps Maximum deviation from the reference price, in bps of the reference
@@ -81,10 +82,10 @@ interface IEquityPriceCapAdapter is ICLSynchronicityPriceAdapter {
   /// @notice Basis-point denominator
   function BPS_DENOMINATOR() external view returns (uint256);
 
-  /// @notice Price feed for the underlying share
+  /// @notice Tokenized equity feed, whose answer is already the total return value of the token
   function ASSET_TO_USD_AGGREGATOR() external view returns (IChainlinkAggregator);
 
-  /// @notice Per-issuer multiplier source
+  /// @notice Per-issuer multiplier source, read for the cross-check only, never for the price
   function EQUITY_MULTIPLIER() external view returns (IEquityMultiplier);
 
   /// @notice ACL manager of the pool
@@ -109,12 +110,25 @@ interface IEquityPriceCapAdapter is ICLSynchronicityPriceAdapter {
   function referenceTimestamp() external view returns (uint48);
 
   /**
-   * @notice Uncapped price, the product of the underlying and the multiplier
-   * @dev Returns zero when either leg is unusable. Exposed so the distance between the raw and
-   *      the published price is observable off-chain without recomputing it.
-   * @return The unbounded price in `decimals()`
+   * @notice The feed's answer, before the band is applied
+   * @dev This is already the total return value of the token: the issuer multiplier is applied
+   *      inside the feed, so nothing further is multiplied in here. Returns zero when the feed
+   *      reports a non-positive answer. Exposed so the distance between the feed and the published
+   *      price is observable without recomputing it.
+   * @return The unbounded feed price in `decimals()`
    */
-  function getRawPrice() external view returns (uint256);
+  function getFeedPrice() external view returns (uint256);
+
+  /**
+   * @notice The underlying share price implied by dividing the feed answer by the multiplier
+   * @dev Purely a cross-check, never part of the published price. The feed applies the multiplier
+   *      internally on its own schedule, so between an issuer writing a new multiplier and the
+   *      feed picking it up, this value jumps by the corporate action's ratio. A discontinuity
+   *      here means the two sides have diverged and the feed is briefly pricing the token against
+   *      the wrong multiplier. Returns zero when either input is unusable.
+   * @return The implied underlying share price in `decimals()`
+   */
+  function getImpliedUnderlyingPrice() external view returns (uint256);
 
   /**
    * @notice Current bounds derived from the reference price and the deviation
@@ -124,16 +138,16 @@ interface IEquityPriceCapAdapter is ICLSynchronicityPriceAdapter {
   function getBounds() external view returns (uint256 lowerBound, uint256 upperBound);
 
   /**
-   * @notice Whether the raw price currently falls outside the bounds
+   * @notice Whether the feed price currently falls outside the bounds
    * @dev True means `latestAnswer` is publishing a clamped price rather than the raw one.
    * @return Whether the published price is being clamped
    */
   function isCapped() external view returns (bool);
 
   /**
-   * @notice Advances the reference price to the current raw price
+   * @notice Advances the reference price to the current feed price
    * @dev Callable by `referenceUpdater`, the risk admin or the pool admin, and no more often than
-   *      `MIN_REFERENCE_DELAY`. The new reference is the raw price as-is, not the clamped one, so
+   *      `MIN_REFERENCE_DELAY`. The new reference is the feed price as-is, not the clamped one, so
    *      a stalled reference does not permanently anchor the band to an old level.
    */
   function updateReferencePrice() external;

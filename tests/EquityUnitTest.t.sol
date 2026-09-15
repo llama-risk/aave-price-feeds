@@ -116,14 +116,17 @@ contract EquityUnitTest is Test {
     assertFalse(adapter.isCapped());
   }
 
-  function test_latestAnswer_appliesMultiplier() external {
-    // a 3-for-1 split: 200% jump in one write, which is legitimate and enormous
+  /// @dev The feed answer is already the total return value of the token, so a multiplier change
+  ///      must NOT move the published price. Multiplying again would apply the same corporate
+  ///      action twice: invisible at 1.0, a factor of three the day a 3-for-1 split lands.
+  function test_latestAnswer_ignoresMultiplier() external {
+    int256 before = adapter.latestAnswer();
+
     token.setMultiplier(3e18);
 
-    assertEq(adapter.getRawPrice(), uint256(BASE_PRICE) * 3);
-    // the band does not know the difference between a split and a compromise, so it clamps
-    assertTrue(adapter.isCapped());
-    assertEq(adapter.latestAnswer(), int256((uint256(BASE_PRICE) * 11_000) / 10_000));
+    assertEq(adapter.latestAnswer(), before);
+    assertEq(adapter.getFeedPrice(), uint256(BASE_PRICE));
+    assertFalse(adapter.isCapped());
   }
 
   function test_latestAnswer_clampsBelow() external {
@@ -153,7 +156,7 @@ contract EquityUnitTest is Test {
     assertEq(adapter.latestAnswer(), int256(upperBound));
   }
 
-  function test_latestAnswer_zeroWhenUnderlyingUnusable() external {
+  function test_latestAnswer_zeroWhenFeedUnusable() external {
     underlying.setLatestAnswer(0);
     assertEq(adapter.latestAnswer(), 0);
     assertFalse(adapter.isCapped());
@@ -163,21 +166,51 @@ contract EquityUnitTest is Test {
     assertFalse(adapter.isCapped());
   }
 
-  function test_latestAnswer_zeroWhenMultiplierUnusable() external {
+  /// @dev A zero multiplier breaks the cross-check but must not disturb the published price.
+  function test_latestAnswer_survivesUnusableMultiplier() external {
     token.setMultiplier(0);
 
-    assertEq(adapter.getRawPrice(), 0);
-    assertEq(adapter.latestAnswer(), 0);
-    assertFalse(adapter.isCapped());
+    assertEq(adapter.latestAnswer(), BASE_PRICE);
+    assertEq(adapter.getImpliedUnderlyingPrice(), 0);
   }
 
-  /// @dev GOOGLc on Base reads 1000377118676784000, not 1e18. Anything asserting exactly 1e18 is
-  ///      wrong on the first read, so the arithmetic is pinned against the real value.
-  function test_latestAnswer_nonUnitBaselineMultiplier() external {
+  // --- cross-check ---
+
+  /// @dev GOOGLc on Base reads 1000377118676784000, not 1e18: a reinvested dividend already
+  ///      inside the feed answer. Dividing it back out recovers the bare share price.
+  function test_impliedUnderlying_nonUnitMultiplier() external {
     token.setMultiplier(1_000377118676784000);
 
-    assertEq(adapter.getRawPrice(), (uint256(BASE_PRICE) * 1_000377118676784000) / 1e18);
-    assertFalse(adapter.isCapped());
+    assertEq(
+      adapter.getImpliedUnderlyingPrice(),
+      (uint256(BASE_PRICE) * 1e18) / 1_000377118676784000
+    );
+    // the published price is untouched by the multiplier
+    assertEq(adapter.latestAnswer(), BASE_PRICE);
+  }
+
+  function test_impliedUnderlying_atUnitMultiplier() external view {
+    assertEq(adapter.getImpliedUnderlyingPrice(), uint256(BASE_PRICE));
+  }
+
+  /// @dev The desync the cross-check exists to surface. The issuer writes a 3-for-1 split; until
+  ///      the feed republishes, the implied share price collapses to a third of its real value.
+  ///      That discontinuity is the signal, and it is invisible from either input alone.
+  function test_impliedUnderlying_revealsMultiplierDesync() external {
+    uint256 beforeSplit = adapter.getImpliedUnderlyingPrice();
+
+    token.setMultiplier(3e18);
+
+    assertEq(adapter.getImpliedUnderlyingPrice(), beforeSplit / 3);
+
+    // once the feed catches up to the split, the implied share price is whole again
+    underlying.setLatestAnswer(BASE_PRICE * 3);
+    assertEq(adapter.getImpliedUnderlyingPrice(), beforeSplit);
+  }
+
+  function test_impliedUnderlying_zeroWhenFeedUnusable() external {
+    underlying.setLatestAnswer(0);
+    assertEq(adapter.getImpliedUnderlyingPrice(), 0);
   }
 
   // --- reference ---
@@ -323,14 +356,17 @@ contract EquityUnitTest is Test {
     (uint256 lowerBound, uint256 upperBound) = adapter.getBounds();
     int256 answer = adapter.latestAnswer();
 
-    if (answer == 0) {
-      // only when a leg is unusable, which bound() excludes, so the product underflowed to zero
-      assertEq(adapter.getRawPrice(), 0);
-      return;
-    }
-
     assertGe(uint256(answer), lowerBound);
     assertLe(uint256(answer), upperBound);
+  }
+
+  /// @dev No multiplier value may move the published price.
+  function testFuzz_multiplierNeverAffectsPrice(uint256 multiplier) external {
+    multiplier = bound(multiplier, 1, 1e24);
+
+    token.setMultiplier(multiplier);
+
+    assertEq(adapter.latestAnswer(), BASE_PRICE);
   }
 }
 

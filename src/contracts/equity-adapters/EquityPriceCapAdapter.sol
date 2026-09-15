@@ -8,39 +8,44 @@ import {IEquityPriceCapAdapter, ICLSynchronicityPriceAdapter, IChainlinkAggregat
 /**
  * @title EquityPriceCapAdapter
  * @author LlamaRisk
- * @notice Price adapter for tokenized equities, bounding the price in both directions.
+ * @notice Price adapter for tokenized equities, bounding the published price in both directions.
  *
- * The published price is the price of the underlying share multiplied by the issuer's multiplier,
- * clamped to a band around a reference price:
+ * The tokenized equity feed already reports the total return value of the token: the issuer's
+ * multiplier is applied inside the feed, so its answer is the finished token price. This adapter
+ * consumes that answer and clamps it to a band around a reference price:
  *
- *   raw   = underlying * multiplier / 10 ** MULTIPLIER_DECIMALS
  *   band  = referencePrice +/- maxDeviationBps
- *   price = min(max(raw, lowerBound), upperBound)
+ *   price = min(max(feedAnswer, lowerBound), upperBound)
  *
- * @dev Three things separate this from the LST cap adapters in this repository.
+ * @dev The multiplier is read here but is deliberately NOT part of the price. Multiplying the feed
+ *      answer by it again would apply the same corporate action twice: harmless while a multiplier
+ *      sits at 1.0, and a factor-of-three error the day a 3-for-1 split lands. The multiplier is
+ *      instead exposed as a cross-check, see `getImpliedUnderlyingPrice` and `EQUITY_MULTIPLIER`.
  *
- *      The band is two-sided. An LST exchange rate only accrues, so capping it from above is
- *      enough: a ratio below trend is a real loss and should be priced. An equity moves both
- *      ways, and for a lender the dangerous direction is down, so an unbounded lower side would
- *      let a single bad print mark the whole collateral class to near zero.
+ *      Why a band at all, when the feed is already a defended oracle. The off-hours methodology
+ *      tracks a fast reference with a slow published series whose half-life stretches from 30
+ *      minutes to 10 hours as the fast series diverges from the Friday anchor, and above 10%
+ *      divergence the published range is unbounded by design. Venue-health HOLD freezes the feed
+ *      on the last good snapshot while the market it prices keeps moving. Each of those is a
+ *      deliberate choice by the feed, and each leaves the published price legitimately far from
+ *      the tradable market. The band bounds what those choices let through; it is not a second
+ *      opinion on the feed's own defences.
  *
- *      The band tracks a reference price rather than growing along a fixed rate from a snapshot.
- *      The LST adapters extrapolate a smooth yearly growth, which suits a quantity that drifts.
- *      An equity price does not drift predictably, and a multiplier does not drift at all: it is
- *      a step function that jumps 200% on a 3-for-1 split. Nothing derived from a growth rate can
- *      both admit that jump and still bound anything useful.
+ *      The band is two-sided, which is the substantive departure from the LST cap adapters here.
+ *      An LST exchange rate only accrues, so capping from above is enough and a ratio below trend
+ *      is a real loss that should be priced. An equity falls as well as rises, and for a lender
+ *      the dangerous direction is down: an unbounded lower side lets one bad print mark a whole
+ *      collateral class to near zero.
  *
- *      Consequently the multiplier carries no magnitude bound here. Its failure mode is a
- *      compromised or mistaken issuer operator, and the defence is a time gate that only permits
- *      a change around a scheduled corporate action. That gate needs a corporate-action calendar,
- *      which does not belong in a pricing contract, so it sits in the operational layer above.
- *      What this contract does is make such a change visible: the price moves outside the band,
- *      `isCapped()` turns true, and the published price stops following the multiplier.
+ *      The band also tracks a reference seeded live rather than growing along a fixed rate from a
+ *      governance snapshot. The LST adapters require their snapshot to be stale by construction so
+ *      a manipulated spot ratio cannot become the anchor, which protects an upper cap. On a lower
+ *      bound the same staleness inverts: after a genuine gap the anchor sits above the market and
+ *      clamps a legitimate move, precisely when correct pricing matters most.
  *
- *      The band is deliberately not a circuit breaker. It does not revert, does not pause and
- *      does not latch. A pricing contract that reverts takes the market down on a data problem,
- *      which is worse than the mispricing it avoids. It clamps and stays live, and the decision
- *      to freeze is taken by an operator reading `isCapped()`.
+ *      The band is not a circuit breaker. It does not revert, pause or latch. A pricing contract
+ *      that reverts takes the market down on a data problem, which is worse than the mispricing it
+ *      avoids. It clamps and stays live, and the decision to freeze is taken by an operator.
  */
 contract EquityPriceCapAdapter is IEquityPriceCapAdapter {
   /// @inheritdoc IEquityPriceCapAdapter
@@ -49,8 +54,8 @@ contract EquityPriceCapAdapter is IEquityPriceCapAdapter {
   /// @inheritdoc IEquityPriceCapAdapter
   uint256 public constant BPS_DENOMINATOR = 10_000;
 
-  /// @dev Above this scale the product of price and multiplier risks overflowing uint256 for
-  ///      plausible prices; every issuer seen so far reports 8 or 18.
+  /// @dev Guards the implied-underlying division against an implausible scale; every issuer seen
+  ///      so far reports 8 or 18.
   uint8 internal constant MAX_MULTIPLIER_DECIMALS = 36;
 
   /// @inheritdoc IEquityPriceCapAdapter
@@ -68,10 +73,10 @@ contract EquityPriceCapAdapter is IEquityPriceCapAdapter {
   /// @inheritdoc IEquityPriceCapAdapter
   uint32 public immutable MIN_REFERENCE_DELAY;
 
-  /// @dev Scale of the published price, inherited from the underlying feed
+  /// @dev Scale of the published price, inherited from the feed
   uint8 internal immutable _DECIMALS;
 
-  /// @dev 10 ** MULTIPLIER_DECIMALS, cached to keep `latestAnswer` cheap
+  /// @dev 10 ** MULTIPLIER_DECIMALS, cached for the cross-check
   uint256 internal immutable _MULTIPLIER_SCALE;
 
   /// @inheritdoc ICLSynchronicityPriceAdapter
@@ -122,10 +127,10 @@ contract EquityPriceCapAdapter is IEquityPriceCapAdapter {
 
     _setMaxDeviationBps(params.maxDeviationBps);
 
-    // Seed the reference from the live price. Unlike the LST adapters there is no governance
-    // snapshot to anchor to: a stale anchor is actively harmful on the lower side, since after a
-    // real gap it would sit above the market and clamp a legitimate move.
-    uint256 seed = getRawPrice();
+    // Seed the reference from the live feed. There is no governance snapshot to anchor to, and a
+    // stale anchor is actively harmful on the lower side: after a real gap it would sit above the
+    // market and clamp a legitimate move.
+    uint256 seed = getFeedPrice();
     if (seed == 0) {
       revert InvalidReferencePrice();
     }
@@ -136,31 +141,42 @@ contract EquityPriceCapAdapter is IEquityPriceCapAdapter {
 
   /// @inheritdoc ICLSynchronicityPriceAdapter
   function latestAnswer() external view returns (int256) {
-    uint256 rawPrice = getRawPrice();
-    if (rawPrice == 0) {
+    uint256 feedPrice = getFeedPrice();
+    if (feedPrice == 0) {
       return 0;
     }
 
     (uint256 lowerBound, uint256 upperBound) = getBounds();
 
-    uint256 price = rawPrice;
+    uint256 price = feedPrice;
     if (price < lowerBound) {
       price = lowerBound;
     } else if (price > upperBound) {
       price = upperBound;
     }
 
-    // Safe: `price` is bounded above by `upperBound`, itself derived from a uint256 reference
-    // scaled by at most 1.5x, and the reference only ever holds a value that fit in int256 when
-    // it was read from the aggregator.
+    // Safe: `price` is bounded above by `upperBound`, itself derived from a reference that only
+    // ever held a value read from the aggregator as a positive int256.
     // forge-lint: disable-next-line(unsafe-typecast)
     return int256(price);
   }
 
   /// @inheritdoc IEquityPriceCapAdapter
-  function getRawPrice() public view returns (uint256) {
-    int256 underlyingPrice = ASSET_TO_USD_AGGREGATOR.latestAnswer();
-    if (underlyingPrice <= 0) {
+  function getFeedPrice() public view returns (uint256) {
+    int256 feedPrice = ASSET_TO_USD_AGGREGATOR.latestAnswer();
+    if (feedPrice <= 0) {
+      return 0;
+    }
+
+    // Safe: `feedPrice > 0` is checked above.
+    // forge-lint: disable-next-line(unsafe-typecast)
+    return uint256(feedPrice);
+  }
+
+  /// @inheritdoc IEquityPriceCapAdapter
+  function getImpliedUnderlyingPrice() external view returns (uint256) {
+    uint256 feedPrice = getFeedPrice();
+    if (feedPrice == 0) {
       return 0;
     }
 
@@ -169,9 +185,7 @@ contract EquityPriceCapAdapter is IEquityPriceCapAdapter {
       return 0;
     }
 
-    // Safe: `underlyingPrice > 0` is checked above.
-    // forge-lint: disable-next-line(unsafe-typecast)
-    return (uint256(underlyingPrice) * multiplier) / _MULTIPLIER_SCALE;
+    return (feedPrice * _MULTIPLIER_SCALE) / multiplier;
   }
 
   /// @inheritdoc IEquityPriceCapAdapter
@@ -184,14 +198,14 @@ contract EquityPriceCapAdapter is IEquityPriceCapAdapter {
 
   /// @inheritdoc IEquityPriceCapAdapter
   function isCapped() external view returns (bool) {
-    uint256 rawPrice = getRawPrice();
-    if (rawPrice == 0) {
+    uint256 feedPrice = getFeedPrice();
+    if (feedPrice == 0) {
       return false;
     }
 
     (uint256 lowerBound, uint256 upperBound) = getBounds();
 
-    return rawPrice < lowerBound || rawPrice > upperBound;
+    return feedPrice < lowerBound || feedPrice > upperBound;
   }
 
   /// @inheritdoc IEquityPriceCapAdapter
@@ -208,10 +222,10 @@ contract EquityPriceCapAdapter is IEquityPriceCapAdapter {
       revert ReferenceUpdatedTooRecently();
     }
 
-    // The reference advances to the raw price, never to the clamped one. Advancing to the clamp
+    // The reference advances to the feed price, never to the clamped one. Advancing to the clamp
     // would let the band walk toward a manipulated price one update at a time, each step looking
     // individually valid.
-    uint256 newReferencePrice = getRawPrice();
+    uint256 newReferencePrice = getFeedPrice();
     if (newReferencePrice == 0) {
       revert InvalidReferencePrice();
     }
