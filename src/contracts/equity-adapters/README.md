@@ -93,7 +93,8 @@ Issuers differ in ways the interface does not hide, and should not:
 
 - Some publish the multiplier directly with no timelock, no staging and no bound on the step size, so a single operator transaction moves it. Others schedule changes ahead with an activation timestamp, which gives the operational layer real lead time.
 - At least one issuer distributes dividends off-chain at redemption rather than reinvesting them, so its multiplier moves on splits only. That is a different economic object, not a variation to normalise away, and it belongs in the listing decision rather than in this code.
-- Rebasing tokens are out of scope. Where an issuer's token rebases, it needs a non-rebasing wrapper before it can be collateral at all, which is a question about the token rather than about pricing it.
+
+These adapters price a token whose balance does not change on its own. A token that rebases is a different integration problem, upstream of pricing, and nothing here addresses it.
 
 ## B20 on Base
 
