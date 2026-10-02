@@ -3,7 +3,7 @@ pragma solidity ^0.8.19;
 
 import {IB20OracleRegistry} from '../../interfaces/IB20OracleRegistry.sol';
 import {ISpoke} from '../../interfaces/ISpoke.sol';
-import {IEquityMultiplierAdapter, IPriceCapAdapter} from '../../interfaces/IEquityMultiplierAdapter.sol';
+import {IEquityMultiplierAdapter, IBoundedRatioAdapter, IPriceCapAdapter} from '../../interfaces/IEquityMultiplierAdapter.sol';
 
 import {BoundedRatioAdapterBase} from '../BoundedRatioAdapterBase.sol';
 
@@ -11,8 +11,9 @@ import {BoundedRatioAdapterBase} from '../BoundedRatioAdapterBase.sol';
  * @title EquityMultiplierAdapter
  * @author LlamaRisk
  * @notice Prices a B20 tokenized equity as (share / USD) x issuer multiplier.
- * @notice The multiplier is kept between the last accepted multiplier and a slowly growing upper bound.
- * @notice Larger moves of the accepted multiplier are possible only while the v4 reserve is paused.
+ * @notice The multiplier is capped by a slowly growing upper bound. A multiplier below the last accepted one,
+ * @notice above the upper bound, or flagged by the issuer is reported as a breach. Larger moves of the accepted
+ * @notice multiplier are possible only while the v4 reserve is paused.
  */
 contract EquityMultiplierAdapter is BoundedRatioAdapterBase, IEquityMultiplierAdapter {
   /// @inheritdoc IEquityMultiplierAdapter
@@ -64,6 +65,10 @@ contract EquityMultiplierAdapter is BoundedRatioAdapterBase, IEquityMultiplierAd
       revert InvalidMultiplier();
     }
 
+    if (params.priceCapParams.snapshotRatio > multiplier) {
+      revert SnapshotRatioOutsideWindow(params.priceCapParams.snapshotRatio);
+    }
+
     if (
       params.priceCapParams.maxYearlyRatioGrowthPercent > params.maximumYearlyRatioGrowthPercent
     ) {
@@ -99,18 +104,43 @@ contract EquityMultiplierAdapter is BoundedRatioAdapterBase, IEquityMultiplierAd
     }
   }
 
+  /// @inheritdoc IEquityMultiplierAdapter
+  function isIssuerPaused() public view returns (bool) {
+    try IB20OracleRegistry(RATIO_PROVIDER).getOracleParams(TOKEN) returns (uint256, bool paused) {
+      return paused;
+    } catch {
+      return false;
+    }
+  }
+
+  /// @inheritdoc IBoundedRatioAdapter
+  function isBreached()
+    public
+    view
+    override(BoundedRatioAdapterBase, IBoundedRatioAdapter)
+    returns (bool)
+  {
+    uint256 ratio = _getRawRatio();
+    return ratio == 0 || ratio < getSnapshotRatio() || ratio > getMaxRatio() || isIssuerPaused();
+  }
+
   function _getRatioUpdatedAt() internal view override returns (uint256) {
     return _getBaseUpdatedAt();
   }
 
+  /// @dev A multiplier drop is priced as is, never above the raw multiplier
   function _getMinRatio(uint256 ratio) internal view override returns (uint256) {
-    if (ratio == 0) {
-      return super._getMinRatio(ratio);
+    if (ratio != 0) {
+      return 0;
     }
 
     uint256 lowerBound = getActiveLowerBound();
     uint256 snapshotRatio = getSnapshotRatio();
-    return lowerBound > snapshotRatio ? lowerBound : snapshotRatio;
+    return lowerBound < snapshotRatio ? lowerBound : snapshotRatio;
+  }
+
+  function _getLowerBoundLimit(uint256 ratio) internal view override returns (uint256) {
+    return ratio == 0 ? getSnapshotRatio() : ratio;
   }
 
   function _validateCapParameters(
@@ -122,6 +152,10 @@ contract EquityMultiplierAdapter is BoundedRatioAdapterBase, IEquityMultiplierAd
 
     if (isReservePaused()) {
       return;
+    }
+
+    if (isIssuerPaused()) {
+      revert IssuerPaused();
     }
 
     if (

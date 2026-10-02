@@ -141,6 +141,16 @@ contract EquityMultiplierAdapterTest is Test {
     vm.expectRevert(IBoundedRatioAdapter.RatioProviderIsZeroAddress.selector);
     new EquityMultiplierAdapter(params);
 
+    params = _params();
+    params.priceCapParams.snapshotRatio = MULTIPLIER + 1;
+    vm.expectRevert(
+      abi.encodeWithSelector(
+        IEquityMultiplierAdapter.SnapshotRatioOutsideWindow.selector,
+        MULTIPLIER + 1
+      )
+    );
+    new EquityMultiplierAdapter(params);
+
     registry.setMultiplier(token, uint256(type(uint104).max) + 1);
     vm.expectRevert(IEquityMultiplierAdapter.InvalidMultiplier.selector);
     new EquityMultiplierAdapter(_params());
@@ -177,26 +187,27 @@ contract EquityMultiplierAdapterTest is Test {
     assertTrue(adapter.isBreached());
   }
 
-  function test_decreaseIsFlooredAtSnapshot() public {
+  function test_decreaseIsPricedAtRawMultiplier() public {
     registry.setMultiplier(token, 0.5e18);
-    assertEq(adapter.getBoundedRatio(), MULTIPLIER);
-    assertEq(adapter.latestAnswer(), BASE_PRICE);
-    assertTrue(adapter.isFloored());
+    assertEq(adapter.getBoundedRatio(), 0.5e18);
+    assertEq(adapter.latestAnswer(), BASE_PRICE / 2);
+    assertFalse(adapter.isFloored());
     assertTrue(adapter.isBreached());
   }
 
-  function test_activeLowerBoundAboveSnapshot() public {
+  function test_lowerBoundDoesNotFloorLiveMultiplier() public {
     registry.setMultiplier(token, 1.005e18);
     vm.prank(riskAdmin);
     adapter.setLowerBound(1.004e18, uint48(block.timestamp + 1 days));
 
     registry.setMultiplier(token, 1.002e18);
-    assertEq(adapter.getBoundedRatio(), 1.004e18);
-    assertTrue(adapter.isBreached());
-
-    skip(1 days);
     assertEq(adapter.getBoundedRatio(), 1.002e18);
     assertFalse(adapter.isBreached());
+
+    registry.setReverts(true);
+    assertEq(adapter.getBoundedRatio(), MULTIPLIER);
+    assertTrue(adapter.isFloored());
+    assertTrue(adapter.isBreached());
   }
 
   function test_registryFailure() public {
@@ -207,10 +218,14 @@ contract EquityMultiplierAdapterTest is Test {
     assertEq(answer, 0);
     assertEq(updatedAt, 0);
 
-    registry.setReverts(false);
+    vm.prank(riskAdmin);
+    vm.expectRevert(
+      abi.encodeWithSelector(IBoundedRatioAdapter.InvalidLowerBound.selector, MULTIPLIER + 1)
+    );
+    adapter.setLowerBound(MULTIPLIER + 1, uint48(block.timestamp + 1 days));
+
     vm.prank(riskAdmin);
     adapter.setLowerBound(MULTIPLIER, uint48(block.timestamp + 1 days));
-    registry.setReverts(true);
     assertEq(adapter.latestAnswer(), BASE_PRICE);
     assertTrue(adapter.isBreached());
   }
@@ -232,7 +247,7 @@ contract EquityMultiplierAdapterTest is Test {
     assertLe(adapter.getMaxRatio(), maxRatio);
 
     registry.setMultiplier(token, 1.003e18);
-    assertEq(adapter.getBoundedRatio(), 1.004e18);
+    assertEq(adapter.getBoundedRatio(), 1.003e18);
     assertTrue(adapter.isBreached());
   }
 
@@ -334,15 +349,35 @@ contract EquityMultiplierAdapterTest is Test {
   function test_reverseSplitWhilePaused() public {
     registry.setMultiplier(token, 0.1e18);
     baseFeed.setLatestAnswer(BASE_PRICE * 10);
-    assertTrue(adapter.isFloored());
+    assertEq(adapter.latestAnswer(), BASE_PRICE);
     assertTrue(adapter.isBreached());
 
     spoke.setPaused(RESERVE_ID, true);
+    assertEq(adapter.latestAnswer(), BASE_PRICE);
     _setCap(0.1e18, block.timestamp - 1 days, YEARLY_GROWTH);
     spoke.setPaused(RESERVE_ID, false);
 
     assertEq(adapter.latestAnswer(), BASE_PRICE);
     assertFalse(adapter.isBreached());
+  }
+
+  function test_reverseSplitWithActiveLowerBound() public {
+    vm.prank(riskAdmin);
+    adapter.setLowerBound(MULTIPLIER, uint48(block.timestamp + 7 days));
+
+    registry.setMultiplier(token, 0.1e18);
+    baseFeed.setLatestAnswer(BASE_PRICE * 10);
+    assertEq(adapter.latestAnswer(), BASE_PRICE);
+
+    spoke.setPaused(RESERVE_ID, true);
+    _setCap(0.1e18, block.timestamp - 1 days, YEARLY_GROWTH);
+    spoke.setPaused(RESERVE_ID, false);
+    assertEq(adapter.latestAnswer(), BASE_PRICE);
+    assertFalse(adapter.isBreached());
+
+    registry.setReverts(true);
+    assertEq(adapter.getBoundedRatio(), 0.1e18);
+    assertEq(adapter.latestAnswer(), BASE_PRICE);
   }
 
   function test_spokeFailureIsNormalMode() public {
@@ -355,9 +390,21 @@ contract EquityMultiplierAdapterTest is Test {
     _setCap(2e18, block.timestamp - 1 days, YEARLY_GROWTH);
   }
 
-  function test_issuerPauseFlagDoesNotMovePrice() public {
+  function test_issuerPauseIsBreach() public {
     registry.setPaused(token, true);
+    assertTrue(adapter.isIssuerPaused());
     assertEq(adapter.latestAnswer(), BASE_PRICE);
+    assertTrue(adapter.isBreached());
+
+    registry.setMultiplier(token, 1.002e18);
+    vm.expectRevert(IEquityMultiplierAdapter.IssuerPaused.selector);
+    _setCap(1.002e18, block.timestamp - 1 days, YEARLY_GROWTH);
+
+    spoke.setPaused(RESERVE_ID, true);
+    _setCap(1.002e18, block.timestamp - 1 days, YEARLY_GROWTH);
+    assertEq(adapter.getSnapshotRatio(), 1.002e18);
+
+    registry.setPaused(token, false);
     assertFalse(adapter.isBreached());
   }
 
@@ -381,8 +428,7 @@ contract EquityMultiplierAdapterTest is Test {
 
     uint256 ratio = adapter.getBoundedRatio();
     uint256 maxRatio = adapter.getMaxRatio();
-    assertGe(ratio, MULTIPLIER);
-    assertLe(ratio, maxRatio);
+    assertEq(ratio, multiplier < maxRatio ? multiplier : maxRatio);
     assertEq(adapter.latestAnswer(), _price(ratio));
     assertEq(adapter.isBreached(), multiplier < MULTIPLIER || multiplier > maxRatio);
   }

@@ -48,6 +48,11 @@ interface IEquityMultiplierAdapter is IBoundedRatioAdapter {
    */
   function isReservePaused() external view returns (bool);
 
+  /**
+   * @notice Returns if the issuer registry flags the multiplier of `TOKEN` as paused, false if the read fails
+   */
+  function isIssuerPaused() external view returns (bool);
+
   error BaseAggregatorIsZeroAddress();
   error TokenIsZeroAddress();
   error ReserveUnderlyingMismatch(address underlying);
@@ -55,4 +60,5 @@ interface IEquityMultiplierAdapter is IBoundedRatioAdapter {
   error MaxYearlyRatioGrowthPercentAboveLimit(uint16 maxYearlyRatioGrowthPercent);
   error SnapshotRatioOutsideWindow(uint256 snapshotRatio);
   error MaxRatioIncrease(uint256 maxRatio);
+  error IssuerPaused();
 }

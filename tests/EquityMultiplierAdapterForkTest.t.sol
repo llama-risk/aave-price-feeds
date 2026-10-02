@@ -160,8 +160,11 @@ contract EquityMultiplierAdapterForkTest is Test {
     assertTrue(adapter.isBreached());
 
     _mockMultiplier(liveMultiplier);
-    assertEq(MAG7_SPOKE_ORACLE.getReservePrice(GOOGLc_RESERVE_ID), _price(basePrice, dividend));
-    assertTrue(adapter.isFloored());
+    assertEq(
+      MAG7_SPOKE_ORACLE.getReservePrice(GOOGLc_RESERVE_ID),
+      _price(basePrice, liveMultiplier)
+    );
+    assertTrue(adapter.isBreached());
   }
 
   function test_splitOnlyWhilePaused() public {
@@ -185,5 +188,44 @@ contract EquityMultiplierAdapterForkTest is Test {
 
     assertFalse(adapter.isBreached());
     assertEq(MAG7_SPOKE_ORACLE.getReservePrice(GOOGLc_RESERVE_ID), _price(basePrice / 2, split));
+  }
+
+  function test_reverseSplitPricedAtRawWhilePaused() public {
+    uint256 reverseSplit = liveMultiplier / 10;
+    _mockMultiplier(reverseSplit);
+    vm.mockCall(
+      MAG7_SPOKE_GOOGLc_PRICE_FEED,
+      abi.encodeWithSelector(IChainlinkAggregator.latestAnswer.selector),
+      abi.encode(int256(basePrice * 10))
+    );
+    assertTrue(adapter.isBreached());
+
+    _setPaused(true);
+    assertEq(
+      MAG7_SPOKE_ORACLE.getReservePrice(GOOGLc_RESERVE_ID),
+      _price(basePrice * 10, reverseSplit)
+    );
+    _setCap(reverseSplit);
+    _setPaused(false);
+
+    assertFalse(adapter.isBreached());
+    assertEq(
+      MAG7_SPOKE_ORACLE.getReservePrice(GOOGLc_RESERVE_ID),
+      _price(basePrice * 10, reverseSplit)
+    );
+  }
+
+  function test_registryFailureRecovery() public {
+    vm.mockCallRevert(GOOGLc, abi.encodeWithSelector(B20_MULTIPLIER_SELECTOR), '');
+    assertTrue(adapter.isBreached());
+    vm.expectRevert();
+    MAG7_SPOKE_ORACLE.getReservePrice(GOOGLc_RESERVE_ID);
+
+    vm.prank(boundsAgent);
+    adapter.setLowerBound(uint104(liveMultiplier), uint48(block.timestamp + 1 days));
+    assertEq(
+      MAG7_SPOKE_ORACLE.getReservePrice(GOOGLc_RESERVE_ID),
+      _price(basePrice, liveMultiplier)
+    );
   }
 }
