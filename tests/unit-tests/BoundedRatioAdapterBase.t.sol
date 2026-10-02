@@ -509,6 +509,58 @@ contract BoundedRatioAdapterBaseTest is Test {
     assertEq(ratio, 1e18);
   }
 
+  function test_recordRatioSkipsFlooredRatio() public {
+    _setLowerBound(1e18);
+    ratioFeed.setLatestAnswer(1);
+    assertTrue(adapter.isFloored());
+    assertEq(adapter.latestAnswer(), 2_000e8);
+
+    vm.prank(address(0xBad));
+    vm.expectRevert(IBoundedRatioAdapter.NoValidRatio.selector);
+    adapter.recordRatio();
+
+    vm.recordLogs();
+    _setLowerBound(1);
+    assertEq(vm.getRecordedLogs().length, 1);
+    (uint256 ratio, ) = adapter.getLastGoodRatio();
+    assertEq(ratio, 1e18);
+
+    vm.mockCallRevert(address(ratioFeed), IChainlinkAggregator.latestAnswer.selector, '');
+    skip(1 days);
+    assertTrue(adapter.isHeld());
+    assertEq(adapter.getBoundedRatio(), 1e18);
+    assertEq(adapter.latestAnswer(), 2_000e8);
+  }
+
+  function test_recordRatioSkipsOlderTimestamp() public {
+    adapter.recordRatio();
+    (, uint256 recordedAt) = adapter.getLastGoodRatio();
+
+    skip(1 days);
+    ratioFeed.setLatestAnswer(0.9e18);
+    vm.mockCall(
+      address(ratioFeed),
+      IChainlinkAggregator.latestTimestamp.selector,
+      abi.encode(recordedAt - 1)
+    );
+    vm.expectRevert(IBoundedRatioAdapter.NoValidRatio.selector);
+    adapter.recordRatio();
+
+    vm.recordLogs();
+    _setLowerBound(0.8e18);
+    assertEq(vm.getRecordedLogs().length, 1);
+    (uint256 ratio, uint256 timestamp) = adapter.getLastGoodRatio();
+    assertEq(ratio, 1e18);
+    assertEq(timestamp, recordedAt);
+
+    vm.mockCall(
+      address(ratioFeed),
+      IChainlinkAggregator.latestTimestamp.selector,
+      abi.encode(recordedAt)
+    );
+    assertEq(adapter.recordRatio(), 0.9e18);
+  }
+
   function test_settersRecordRatio() public {
     ratioFeed.setLatestAnswer(0.97e18);
     vm.expectEmit(address(adapter));

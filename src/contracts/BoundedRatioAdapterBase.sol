@@ -268,12 +268,13 @@ abstract contract BoundedRatioAdapterBase is IBoundedRatioAdapter {
       revert InvalidLowerBound(lowerBound);
     }
 
+    // record against the previous bound, so a new bound cannot unfloor a breached ratio
+    _recordRatio();
+
     _lowerBound = lowerBound;
     _lowerBoundExpiration = expiration;
 
     emit LowerBoundUpdated(lowerBound, expiration);
-
-    _recordRatio();
   }
 
   /// @dev Timestamp of the latest ratio update, must not revert
@@ -329,10 +330,11 @@ abstract contract BoundedRatioAdapterBase is IBoundedRatioAdapter {
     return (int256((basePrice * ratio * _SCALE_UP) / _SCALE_DOWN), held);
   }
 
-  /// @dev Stores the valid raw ratio, capped by the upper bound, with the ratio source timestamp
+  /// @dev Stores the valid, non-floored raw ratio, capped by the upper bound, with the ratio source timestamp.
+  /// Skips (returns 0) when the ratio is invalid or floored, or its timestamp is older than the stored one
   function _recordRatio() internal returns (uint256) {
     uint256 ratio = _getRawRatio();
-    if (ratio == 0) {
+    if (ratio == 0 || ratio < _getMinRatio(ratio)) {
       return 0;
     }
 
@@ -347,6 +349,9 @@ abstract contract BoundedRatioAdapterBase is IBoundedRatioAdapter {
     uint256 updatedAt = _getRatioUpdatedAt();
     if (updatedAt == 0 || updatedAt > block.timestamp) {
       updatedAt = block.timestamp;
+    }
+    if (updatedAt < _lastGoodRatioTimestamp) {
+      return 0;
     }
 
     // forge-lint: disable-next-line(unsafe-typecast)

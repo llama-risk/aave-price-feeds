@@ -44,7 +44,8 @@ interface IBoundedRatioAdapter is IPriceCapAdapter {
 
   /**
    * @notice Records the current raw ratio, capped by the upper bound, as the last good ratio
-   * @dev Permissionless. `setLowerBound` and `setCapParameters` also record it. Reverts if the raw ratio is invalid
+   * @dev Permissionless. `setLowerBound` and `setCapParameters` also record it (and skip silently).
+   * Reverts if the raw ratio is invalid, below the active lower bound, or older than the stored last good ratio
    * @return ratio the recorded ratio
    */
   function recordRatio() external returns (uint256 ratio);
