@@ -282,23 +282,43 @@ contract BoundedRatioAdapterBaseTest is Test {
     assertFalse(adapter.isBreached());
   }
 
-  function test_lowerBoundRenewalDuringBreach() public {
+  function test_lowerBoundCannotBeRenewedAboveRatio() public {
     _setLowerBound(0.95e18);
     ratioFeed.setLatestAnswer(0.5e18);
-
-    vm.expectRevert(
-      abi.encodeWithSelector(IBoundedRatioAdapter.InvalidLowerBound.selector, 0.95e18 + 1)
-    );
-    vm.prank(riskAdmin);
-    adapter.setLowerBound(0.95e18 + 1, uint48(block.timestamp + 1 days));
-
-    skip(12 hours);
-    _setLowerBound(0.95e18);
-    skip(1 days - 1);
     assertEq(adapter.latestAnswer(), 1_900e8);
 
-    _setLowerBound(0);
+    vm.expectRevert(
+      abi.encodeWithSelector(IBoundedRatioAdapter.InvalidLowerBound.selector, 0.95e18)
+    );
+    vm.prank(riskAdmin);
+    adapter.setLowerBound(0.95e18, uint48(block.timestamp + 1 days));
+
+    vm.expectRevert(
+      abi.encodeWithSelector(IBoundedRatioAdapter.InvalidLowerBound.selector, 0.5e18 + 1)
+    );
+    vm.prank(riskAdmin);
+    adapter.setLowerBound(0.5e18 + 1, uint48(block.timestamp + 1 days));
+
+    _setLowerBound(0.5e18);
     assertEq(adapter.latestAnswer(), 1_000e8);
+    assertFalse(adapter.isBreached());
+  }
+
+  function test_breachedLowerBoundExpiresOnSchedule() public {
+    _setLowerBound(0.95e18);
+    ratioFeed.setLatestAnswer(0.1e18);
+
+    for (uint256 i; i < 4; ++i) {
+      skip(6 hours);
+      vm.expectRevert(
+        abi.encodeWithSelector(IBoundedRatioAdapter.InvalidLowerBound.selector, 0.95e18)
+      );
+      vm.prank(riskAdmin);
+      adapter.setLowerBound(0.95e18, uint48(block.timestamp + 1 days));
+    }
+
+    assertEq(adapter.getActiveLowerBound(), 0);
+    assertEq(adapter.latestAnswer(), 200e8);
   }
 
   function test_upperBoundWinsOverLowerBound() public {
@@ -360,6 +380,61 @@ contract BoundedRatioAdapterBaseTest is Test {
     assertEq(adapter.latestAnswer(), 0);
   }
 
+  function test_lowerBoundRecoveryDuringRatioFailure() public {
+    _setLowerBound(0.95e18);
+    vm.mockCallRevert(address(ratioFeed), IChainlinkAggregator.latestAnswer.selector, '');
+    skip(1 days);
+    assertEq(adapter.latestAnswer(), 0);
+
+    vm.expectRevert(
+      abi.encodeWithSelector(IBoundedRatioAdapter.InvalidLowerBound.selector, 0.95e18 + 1)
+    );
+    vm.prank(riskAdmin);
+    adapter.setLowerBound(0.95e18 + 1, uint48(block.timestamp + 1 days));
+
+    _setLowerBound(0.95e18);
+    assertEq(adapter.latestAnswer(), 1_900e8);
+
+    _setLowerBound(0.9e18);
+    vm.expectRevert(
+      abi.encodeWithSelector(IBoundedRatioAdapter.InvalidLowerBound.selector, 0.95e18)
+    );
+    vm.prank(riskAdmin);
+    adapter.setLowerBound(0.95e18, uint48(block.timestamp + 1 days));
+    assertEq(adapter.latestAnswer(), 1_800e8);
+  }
+
+  function test_noLowerBoundDuringRatioFailureWithoutPreviousBound() public {
+    ratioFeed.setLatestAnswer(0);
+    vm.expectRevert(abi.encodeWithSelector(IBoundedRatioAdapter.InvalidLowerBound.selector, 1));
+    vm.prank(riskAdmin);
+    adapter.setLowerBound(1, uint48(block.timestamp + 1 days));
+
+    _setLowerBound(0);
+    assertEq(adapter.latestAnswer(), 0);
+  }
+
+  function test_lowerBoundCappedByUpperBoundDuringRatioFailure() public {
+    _setLowerBound(1e18);
+    skip(1);
+    vm.prank(riskAdmin);
+    adapter.setCapParameters(
+      IPriceCapAdapter.PriceCapUpdateParams({
+        snapshotRatio: 0.9e18,
+        snapshotTimestamp: uint48(block.timestamp),
+        maxYearlyRatioGrowthPercent: 0
+      })
+    );
+    ratioFeed.setLatestAnswer(0);
+
+    vm.expectRevert(abi.encodeWithSelector(IBoundedRatioAdapter.InvalidLowerBound.selector, 1e18));
+    vm.prank(riskAdmin);
+    adapter.setLowerBound(1e18, uint48(block.timestamp + 1 days));
+
+    _setLowerBound(0.9e18);
+    assertEq(adapter.latestAnswer(), 1_800e8);
+  }
+
   function test_basePriceFailure() public {
     baseFeed.setLatestAnswer(0);
     assertEq(adapter.latestAnswer(), 0);
@@ -385,7 +460,21 @@ contract BoundedRatioAdapterBaseTest is Test {
     assertFalse(adapter.isBreached());
   }
 
-  function test_latestRoundData() public view {
+  function test_latestRoundData() public {
+    skip(1 days);
+    uint256 ratioUpdatedAt = block.timestamp - 2 hours;
+    uint256 baseUpdatedAt = block.timestamp - 1 hours;
+    vm.mockCall(
+      address(ratioFeed),
+      IChainlinkAggregator.latestTimestamp.selector,
+      abi.encode(ratioUpdatedAt)
+    );
+    vm.mockCall(
+      address(baseFeed),
+      IChainlinkAggregator.latestTimestamp.selector,
+      abi.encode(baseUpdatedAt)
+    );
+
     (
       uint80 roundId,
       int256 answer,
@@ -395,9 +484,42 @@ contract BoundedRatioAdapterBaseTest is Test {
     ) = adapter.latestRoundData();
     assertEq(roundId, 0);
     assertEq(answer, adapter.latestAnswer());
-    assertEq(startedAt, block.timestamp);
-    assertEq(updatedAt, block.timestamp);
+    assertEq(startedAt, ratioUpdatedAt);
+    assertEq(updatedAt, ratioUpdatedAt);
     assertEq(answeredInRound, 0);
+
+    vm.mockCall(
+      address(baseFeed),
+      IChainlinkAggregator.latestTimestamp.selector,
+      abi.encode(ratioUpdatedAt - 1)
+    );
+    (, , , updatedAt, ) = adapter.latestRoundData();
+    assertEq(updatedAt, ratioUpdatedAt - 1);
+
+    vm.mockCallRevert(address(baseFeed), IChainlinkAggregator.latestTimestamp.selector, '');
+    (, answer, , updatedAt, ) = adapter.latestRoundData();
+    assertEq(answer, 2_000e8);
+    assertEq(updatedAt, 0);
+  }
+
+  function test_latestRoundDataZeroAnswer() public {
+    ratioFeed.setLatestAnswer(0);
+    (, int256 answer, uint256 startedAt, uint256 updatedAt, ) = adapter.latestRoundData();
+    assertEq(answer, 0);
+    assertEq(startedAt, 0);
+    assertEq(updatedAt, 0);
+  }
+
+  function test_latestRoundDataWithoutBaseFeed() public {
+    BoundedRatioAdapterMock ratioOnly = new BoundedRatioAdapterMock(_params(address(0), 18));
+    vm.mockCall(
+      address(ratioFeed),
+      IChainlinkAggregator.latestTimestamp.selector,
+      abi.encode(block.timestamp - 3 hours)
+    );
+    (, int256 answer, , uint256 updatedAt, ) = ratioOnly.latestRoundData();
+    assertEq(answer, 1e8);
+    assertEq(updatedAt, block.timestamp - 3 hours);
   }
 }
 
@@ -544,22 +666,38 @@ contract BoundedRatioAdapterBaseFuzzTest is Test {
 
   function testFuzz_lowerBoundNeverRaisesPrice(
     int256 rawRatio,
+    uint104 previousLowerBound,
     uint104 lowerBound,
-    uint32 expirationDelay
+    uint32 expirationDelay,
+    uint32 elapsed
   ) public {
     BoundedRatioAdapterMock adapter = _deploy(address(baseFeed), 18, 1e18, 10_00);
     skip(30 days);
+    previousLowerBound = uint104(bound(previousLowerBound, 0, 1e18));
+    vm.prank(riskAdmin);
+    adapter.setLowerBound(previousLowerBound, uint48(block.timestamp + 30 days));
+
+    skip(elapsed % 60 days);
     rawRatio = bound(rawRatio, -1, 2e18);
     ratioFeed.setLatestAnswer(rawRatio);
     uint48 expiration = uint48(block.timestamp + bound(expirationDelay, 1, 30 days));
 
+    uint256 raw = rawRatio > 0 ? uint256(rawRatio) : 0;
+    uint256 maxRatio = adapter.getMaxRatio();
+    uint256 limit = raw > 0 ? raw : previousLowerBound;
+    if (limit > maxRatio) limit = maxRatio;
+
     int256 priceBefore = adapter.latestAnswer();
     vm.prank(riskAdmin);
     try adapter.setLowerBound(lowerBound, expiration) {
-      assertLe(adapter.latestAnswer(), priceBefore);
+      assertLe(lowerBound, limit);
       assertEq(adapter.getActiveLowerBound(), lowerBound);
+      if (raw > 0) {
+        assertLe(adapter.latestAnswer(), priceBefore);
+        assertFalse(adapter.isFloored());
+      }
     } catch {
-      assertGt(lowerBound, adapter.getBoundedRatio());
+      assertGt(lowerBound, limit);
     }
   }
 }

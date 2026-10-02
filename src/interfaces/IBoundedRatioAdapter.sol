@@ -29,7 +29,7 @@ interface IBoundedRatioAdapter is IPriceCapAdapter {
 
   /**
    * @notice Sets the lower bound of the ratio until `expiration`
-   * @param lowerBound minimum ratio, at most the currently bounded ratio
+   * @param lowerBound minimum ratio, at most the upper bound and the current ratio (the stored lower bound while the ratio is invalid)
    * @param expiration timestamp from which the bound no longer applies
    */
   function setLowerBound(uint104 lowerBound, uint48 expiration) external;
@@ -71,6 +71,7 @@ interface IBoundedRatioAdapter is IPriceCapAdapter {
 
   /**
    * @notice Returns the latest answer in the AggregatorV3 format
+   * @dev `updatedAt` is the older of the ratio and base feed timestamps, 0 when the answer is 0
    */
   function latestRoundData()
     external

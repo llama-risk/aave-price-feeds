@@ -223,8 +223,9 @@ abstract contract BoundedRatioAdapterBase is IBoundedRatioAdapter {
       uint80 answeredInRound
     )
   {
-    uint256 timestamp = _getUpdatedAt();
-    return (0, latestAnswer(), timestamp, timestamp, 0);
+    answer = latestAnswer();
+    updatedAt = answer > 0 ? _getUpdatedAt() : 0;
+    return (0, answer, updatedAt, updatedAt, 0);
   }
 
   /// @inheritdoc IPriceCapAdapter
@@ -244,8 +245,12 @@ abstract contract BoundedRatioAdapterBase is IBoundedRatioAdapter {
       revert InvalidLowerBoundExpiration(expiration);
     }
 
-    // a new lower bound can hold the price but never raise it
-    if (lowerBound > getBoundedRatio()) {
+    // without a valid ratio, only the last stored lower bound or a lower one can be set
+    uint256 limit = _getRawRatio();
+    if (limit == 0) {
+      limit = _lowerBound;
+    }
+    if (lowerBound > limit || lowerBound > getMaxRatio()) {
       revert InvalidLowerBound(lowerBound);
     }
 
@@ -255,8 +260,29 @@ abstract contract BoundedRatioAdapterBase is IBoundedRatioAdapter {
     emit LowerBoundUpdated(lowerBound, expiration);
   }
 
+  /// @dev Timestamp of the latest ratio update
+  function _getRatioUpdatedAt() internal view virtual returns (uint256);
+
   function _getUpdatedAt() internal view virtual returns (uint256) {
-    return block.timestamp;
+    uint256 updatedAt = _getRatioUpdatedAt();
+    if (address(BASE_TO_USD_AGGREGATOR) != address(0)) {
+      uint256 baseUpdatedAt = _getBaseUpdatedAt();
+      if (baseUpdatedAt < updatedAt) {
+        updatedAt = baseUpdatedAt;
+      }
+    }
+    return updatedAt;
+  }
+
+  /// @dev 0 when the feed reverts or returns malformed data
+  function _getBaseUpdatedAt() internal view returns (uint256) {
+    (bool success, bytes memory data) = address(BASE_TO_USD_AGGREGATOR).staticcall(
+      abi.encodeCall(IChainlinkAggregator.latestTimestamp, ())
+    );
+    if (!success || data.length != 32) {
+      return 0;
+    }
+    return abi.decode(data, (uint256));
   }
 
   /// @dev 0 when the provider reverts or returns a non-positive ratio

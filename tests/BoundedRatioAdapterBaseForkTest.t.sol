@@ -80,6 +80,12 @@ contract BoundedRatioAdapterBaseForkTest is Test {
     );
     assertFalse(adapter.isBreached());
 
+    (, , , uint256 updatedAt, ) = adapter.latestRoundData();
+    assertEq(
+      updatedAt,
+      IChainlinkAggregator(ChainlinkBase.AAVE_SVR_WEETH__EETH_Exchange_Rate).latestTimestamp()
+    );
+
     uint256 ratio = adapter.getBoundedRatio();
     vm.prank(boundsAgent);
     adapter.setLowerBound(uint104((ratio * 99) / 100), uint48(block.timestamp + 1 days));
@@ -131,5 +137,9 @@ contract BoundedRatioAdapterBaseForkTest is Test {
     skip(3 days);
     vm.expectRevert(abi.encodeWithSelector(IAaveV4Oracle.InvalidPrice.selector, AAPLc_RESERVE_ID));
     MAG7_SPOKE_ORACLE.getReservePrice(AAPLc_RESERVE_ID);
+
+    vm.prank(boundsAgent);
+    adapter.setLowerBound(uint104(uint256(rawPrice) * 9) / 10, uint48(block.timestamp + 3 days));
+    assertEq(MAG7_SPOKE_ORACLE.getReservePrice(AAPLc_RESERVE_ID), (uint256(rawPrice) * 9) / 10);
   }
 }

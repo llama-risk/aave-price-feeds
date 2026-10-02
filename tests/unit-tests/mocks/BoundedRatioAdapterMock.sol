@@ -9,4 +9,8 @@ contract BoundedRatioAdapterMock is BoundedRatioAdapterBase {
   function getRatio() public view override returns (int256) {
     return IChainlinkAggregator(RATIO_PROVIDER).latestAnswer();
   }
+
+  function _getRatioUpdatedAt() internal view override returns (uint256) {
+    return IChainlinkAggregator(RATIO_PROVIDER).latestTimestamp();
+  }
 }

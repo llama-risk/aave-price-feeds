@@ -89,15 +89,19 @@ price      = basePrice × ratio (or ratio alone without a base feed), 8 decimals
 
 ### Parameters
 
-| Parameter                                                           | Description                                                                      |
-| ------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| `snapshotRatio`, `snapshotTimestamp`, `maxYearlyRatioGrowthPercent` | Upper bound, same rules as `PriceCapAdapterBase`                                 |
-| `lowerBound`, `expiration`                                          | Set by a risk or pool admin; the bound cannot be above the current bounded ratio |
-| `maximumLowerBoundDuration`                                         | Longest time a lower bound can stay active                                       |
+| Parameter                                                           | Description                                                                |
+| ------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `snapshotRatio`, `snapshotTimestamp`, `maxYearlyRatioGrowthPercent` | Upper bound, same rules as `PriceCapAdapterBase`                           |
+| `lowerBound`, `expiration`                                          | Set by a risk or pool admin; at most the current ratio and the upper bound |
+| `maximumLowerBoundDuration`                                         | Longest time a lower bound can stay active                                 |
 
 ### Failure Policy
 
 - The ratio provider reverts or returns 0 or less: the active lower bound is used. Without one, the answer is 0.
+- A 0 answer makes the v4 `AaveOracle` revert, so health factors and liquidations for the reserve revert until a lower bound is set again or the source is replaced.
+- While the ratio is invalid, a new lower bound can be at most the last stored one, so an expired bound can be set again.
+- A lower bound above the current ratio cannot be renewed, so it expires on schedule.
+- `latestRoundData` reports the older of the ratio and base feed timestamps, and 0 when the answer is 0.
 - The base feed reverts or returns 0 or less: the answer is 0, as in `PriceCapAdapterBase`.
 - The upper bound wins if a cap update moves it below the lower bound.
 - `isCapped`, `isFloored` and `isBreached` never revert, so agents can read them.
