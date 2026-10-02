@@ -74,6 +74,36 @@ else return oraclePrice
 
 ---
 
+## BoundedRatioAdapterBase (two-sided bounds)
+
+Abstract base for assets whose ratio can move up and down, such as NAV feeds and equity multipliers.
+
+### How It Works
+
+```text
+upperBound = snapshotRatio + (maxGrowthPerSecond × timeSinceSnapshot)
+lowerBound = published lower bound while now < expiration, 0 after
+ratio      = min(max(currentRatio, lowerBound), upperBound)
+price      = basePrice × ratio (or ratio alone without a base feed), 8 decimals
+```
+
+### Parameters
+
+| Parameter                                                           | Description                                                                      |
+| ------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `snapshotRatio`, `snapshotTimestamp`, `maxYearlyRatioGrowthPercent` | Upper bound, same rules as `PriceCapAdapterBase`                                 |
+| `lowerBound`, `expiration`                                          | Set by a risk or pool admin; the bound cannot be above the current bounded ratio |
+| `maximumLowerBoundDuration`                                         | Longest time a lower bound can stay active                                       |
+
+### Failure Policy
+
+- The ratio provider reverts or returns 0 or less: the active lower bound is used. Without one, the answer is 0.
+- The base feed reverts or returns 0 or less: the answer is 0, as in `PriceCapAdapterBase`.
+- The upper bound wins if a cap update moves it below the lower bound.
+- `isCapped`, `isFloored` and `isBreached` never revert, so agents can read them.
+
+---
+
 ## PendlePriceCapAdapter (PT Tokens)
 
 Adapter for Pendle Principal Tokens using linear discount decay model.
