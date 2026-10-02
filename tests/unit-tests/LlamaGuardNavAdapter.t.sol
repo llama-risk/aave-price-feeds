@@ -115,6 +115,12 @@ contract LlamaGuardNavAdapterTest is Test {
     navOracle.setDecimals(6);
     vm.expectRevert(LlamaGuardNavAdapter.InvalidMaxNavAge.selector);
     new LlamaGuardNavAdapter(_params(address(navOracle), SNAPSHOT_NAV, 0));
+
+    vm.expectRevert(LlamaGuardNavAdapter.InvalidMaxNavAge.selector);
+    new LlamaGuardNavAdapter(
+      _params(address(navOracle), SNAPSHOT_NAV, MAX_LOWER_BOUND_DURATION - 1)
+    );
+    new LlamaGuardNavAdapter(_params(address(navOracle), SNAPSHOT_NAV, MAX_LOWER_BOUND_DURATION));
   }
 
   function test_decimalsScaling() public {
@@ -192,7 +198,7 @@ contract LlamaGuardNavAdapterTest is Test {
     assertTrue(adapter.isBreached());
     (, int256 answer, , uint256 updatedAt, ) = adapter.latestRoundData();
     assertEq(answer, 11.2e8);
-    assertEq(updatedAt, 0);
+    assertEq(updatedAt, navUpdatedAt);
 
     skip(1 days);
     (, answer, , updatedAt, ) = adapter.latestRoundData();
@@ -203,6 +209,7 @@ contract LlamaGuardNavAdapterTest is Test {
   }
 
   function test_oracleRevertUsesLowerBoundThenLastGood() public {
+    uint256 navUpdatedAt = block.timestamp - 1 hours;
     _setLowerBound(11.2e6);
 
     vm.mockCallRevert(address(navOracle), ILlamaGuardOracle.latestRoundData.selector, '');
@@ -210,7 +217,7 @@ contract LlamaGuardNavAdapterTest is Test {
     assertTrue(adapter.isBreached());
     (, int256 answer, , uint256 updatedAt, ) = adapter.latestRoundData();
     assertEq(answer, 11.2e8);
-    assertEq(updatedAt, 0);
+    assertEq(updatedAt, navUpdatedAt);
 
     skip(1 days);
     assertEq(adapter.latestAnswer(), NAV * 100);
@@ -223,6 +230,7 @@ contract LlamaGuardNavAdapterTest is Test {
   }
 
   function test_malformedOracleDataUsesLowerBound() public {
+    uint256 navUpdatedAt = block.timestamp - 1 hours;
     _setLowerBound(11.2e6);
 
     vm.mockCall(
@@ -232,7 +240,7 @@ contract LlamaGuardNavAdapterTest is Test {
     );
     assertEq(adapter.latestAnswer(), 11.2e8);
     (, , , uint256 updatedAt, ) = adapter.latestRoundData();
-    assertEq(updatedAt, 0);
+    assertEq(updatedAt, navUpdatedAt);
 
     vm.mockCall(
       address(navOracle),
@@ -241,7 +249,7 @@ contract LlamaGuardNavAdapterTest is Test {
     );
     assertEq(adapter.latestAnswer(), 11.2e8);
     (, , , updatedAt, ) = adapter.latestRoundData();
-    assertEq(updatedAt, 0);
+    assertEq(updatedAt, navUpdatedAt);
   }
 
   function test_staleNavUsesLowerBoundThenLastGood() public {
@@ -259,7 +267,7 @@ contract LlamaGuardNavAdapterTest is Test {
     assertEq(adapter.latestAnswer(), 11.2e8);
     assertTrue(adapter.isBreached());
     (, , , uint256 updatedAt, ) = adapter.latestRoundData();
-    assertEq(updatedAt, 0);
+    assertEq(updatedAt, navUpdatedAt);
 
     vm.startPrank(riskAdmin);
     vm.expectRevert(
@@ -301,6 +309,30 @@ contract LlamaGuardNavAdapterTest is Test {
     navOracle.setAnswer(11.23e6);
     assertEq(adapter.recordRatio(), 11.23e6);
     assertEq(adapter.getLastGoodRatioAge(), 0);
+  }
+
+  function test_navDropThenStallRecordableAfterBoundExpires() public {
+    vm.prank(riskAdmin);
+    adapter.setLowerBound(11.2e6, uint48(block.timestamp + MAX_LOWER_BOUND_DURATION));
+    skip(1 hours);
+    navOracle.setAnswer(5e6);
+    uint256 crashUpdatedAt = block.timestamp;
+    assertEq(adapter.latestAnswer(), 11.2e8);
+    vm.expectRevert(IBoundedRatioAdapter.NoValidRatio.selector);
+    adapter.recordRatio();
+
+    skip(MAX_LOWER_BOUND_DURATION);
+    assertEq(adapter.getActiveLowerBound(), 0);
+    assertEq(adapter.getRatio(), 5e6);
+    assertEq(adapter.latestAnswer(), 5e8);
+    assertEq(adapter.recordRatio(), 5e6);
+
+    skip(MAX_NAV_AGE);
+    assertEq(adapter.getRatio(), 0);
+    assertTrue(adapter.isHeld());
+    (, int256 answer, , uint256 updatedAt, ) = adapter.latestRoundData();
+    assertEq(answer, 5e8);
+    assertEq(updatedAt, crashUpdatedAt);
   }
 
   function test_futureNavRoundIgnored() public {

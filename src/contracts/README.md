@@ -130,7 +130,8 @@ price      = basePrice × ratio (or ratio alone without a base feed), 8 decimals
 - The source oracle must store the unbounded NAV. If the workflow writes a NAV that it already clamped, a NAV move outside its bounds is not visible, and `isBreached` cannot detect it.
 - A round older than `MAX_NAV_AGE`, a round in the future, a reverting oracle, malformed data, or an answer of 0 or less gives a ratio of 0. The active lower bound then sets the price. Without one, the price holds the last good NAV.
 - Only a fresh round can be recorded as the last good NAV, with the round timestamp. `MAX_NAV_AGE` sets when the live NAV stops being used. It does not limit how long a held NAV is used.
-- `updatedAt` is the NAV round timestamp, also while held, so a held NAV shows its real age. It is 0 when the lower bound sets the price because the NAV is invalid.
+- `updatedAt` is the NAV round timestamp. When the NAV is invalid (lower bound or held NAV sets the price), it is the last good NAV timestamp, so consumers see the real age of the data.
+- `MAX_NAV_AGE` must be at least `MAXIMUM_LOWER_BOUND_DURATION`. A NAV that falls below a lower bound is then still fresh when the bound expires, and the live NAV sets the price. A keeper must call `recordRatio` (or the BoundsAgent must set a new bound) in that window. If not, the price goes back to the held NAV from before the drop when the NAV becomes stale.
 - `RATIO_PROVIDER` is immutable. If the workflow writes to a different oracle, deploy a new adapter.
 - Bounds are set by the risk or pool admins of the `ACL_MANAGER`, also when the adapter is an Aave v4 price feed.
 

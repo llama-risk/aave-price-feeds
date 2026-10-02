@@ -25,7 +25,7 @@ contract LlamaGuardNavAdapterForkTest is Test {
   address public constant MAIN_SPOKE = 0x94e7A5dCbE816e498b89aB752661904E2F56c485;
 
   uint16 public constant MAX_YEARLY_GROWTH = 5_00;
-  uint48 public constant MAX_LOWER_BOUND_DURATION = 5 days;
+  uint48 public constant MAX_LOWER_BOUND_DURATION = 4 days;
   uint48 public constant MAX_NAV_AGE = 4 days;
   uint256 public constant LOWER_BOUND_DISCOUNT_BPS = 15;
 
@@ -138,7 +138,7 @@ contract LlamaGuardNavAdapterForkTest is Test {
     assertTrue(adapter.isBreached());
     (, int256 answer, , uint256 updatedAt, ) = adapter.latestRoundData();
     assertEq(answer, int256(adapter.getActiveLowerBound()) * 100);
-    assertEq(updatedAt, 0);
+    assertEq(updatedAt, navUpdatedAt);
     vm.expectRevert(IBoundedRatioAdapter.NoValidRatio.selector);
     adapter.recordRatio();
 

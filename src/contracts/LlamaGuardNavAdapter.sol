@@ -15,6 +15,7 @@ contract LlamaGuardNavAdapter is BoundedRatioAdapterBase {
 
   /**
    * @notice Maximum age of a NAV round; an older round is treated as no NAV
+   * @dev At least `MAXIMUM_LOWER_BOUND_DURATION`, so a NAV below a lower bound is still fresh when the bound expires
    */
   uint48 public immutable MAX_NAV_AGE;
 
@@ -51,7 +52,7 @@ contract LlamaGuardNavAdapter is BoundedRatioAdapterBase {
       })
     )
   {
-    if (params.maxNavAge == 0) {
+    if (params.maxNavAge == 0 || params.maxNavAge < params.maximumLowerBoundDuration) {
       revert InvalidMaxNavAge();
     }
     MAX_NAV_AGE = params.maxNavAge;
@@ -64,9 +65,12 @@ contract LlamaGuardNavAdapter is BoundedRatioAdapterBase {
     return answer;
   }
 
-  /// @dev 0 when `getRatio` is 0, so a lower bound serving in place of the NAV reports 0
+  /// @dev The last good NAV timestamp when `getRatio` is 0
   function _getRatioUpdatedAt() internal view override returns (uint256) {
-    (, uint256 updatedAt) = _getNav();
+    (int256 answer, uint256 updatedAt) = _getNav();
+    if (answer == 0) {
+      (, updatedAt) = this.getLastGoodRatio();
+    }
     return updatedAt;
   }
 
