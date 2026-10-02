@@ -125,6 +125,33 @@ price      = basePrice × ratio (or ratio alone without a base feed), 8 decimals
 
 ---
 
+## EquityMultiplierAdapter (B20 tokenized equities)
+
+`BoundedRatioAdapterBase` where the ratio is the issuer multiplier of a B20 token, read from the B20 oracle registry (`getOracleParams(token)`, 18 decimals). The base feed prices the share without the multiplier.
+
+### How It Works
+
+```text
+lowerBound = max(snapshotRatio, active lower bound)
+upperBound = snapshotRatio + (maxGrowthPerSecond × timeSinceSnapshot)
+ratio      = min(max(multiplier, lowerBound), upperBound)
+price      = sharePrice × ratio, 8 decimals
+```
+
+The snapshot is the last accepted multiplier. A multiplier outside the bounds is clamped and `isBreached` returns true, so the pause agent can pause the reserve.
+
+### Cap Updates
+
+| Reserve state on the v4 spoke | Allowed `setCapParameters`                                                                                  |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Not paused                    | Snapshot between the current snapshot and the live multiplier; the upper bound must not increase right away |
+| Paused                        | Any snapshot (splits, reverse splits)                                                                       |
+| Both                          | `maxYearlyRatioGrowthPercent` at most `MAXIMUM_YEARLY_RATIO_GROWTH_PERCENT`                                 |
+
+If the spoke read fails, the reserve counts as not paused. If the registry read fails, the base rules apply: the active lower bound is used, or the answer is 0.
+
+---
+
 ## PendlePriceCapAdapter (PT Tokens)
 
 Adapter for Pendle Principal Tokens using linear discount decay model.
