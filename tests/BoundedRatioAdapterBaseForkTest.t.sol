@@ -89,6 +89,9 @@ contract BoundedRatioAdapterBaseForkTest is Test {
     uint256 ratio = adapter.getBoundedRatio();
     vm.prank(boundsAgent);
     adapter.setLowerBound(uint104((ratio * 99) / 100), uint48(block.timestamp + 1 days));
+    (uint256 lastGoodRatio, uint256 lastGoodTimestamp) = adapter.getLastGoodRatio();
+    assertEq(lastGoodRatio, ratio);
+    assertEq(lastGoodTimestamp, updatedAt);
 
     vm.mockCallRevert(
       ChainlinkBase.AAVE_SVR_WEETH__EETH_Exchange_Rate,
@@ -97,8 +100,37 @@ contract BoundedRatioAdapterBaseForkTest is Test {
     );
     assertApproxEqRel(AaveV3Base.ORACLE.getAssetPrice(assets[0]), (price * 99) / 100, 1e10);
     assertTrue(adapter.isBreached());
+    assertFalse(adapter.isHeld());
 
     skip(1 days);
+    assertTrue(adapter.isHeld());
+    uint256 basePrice = uint256(
+      IChainlinkAggregator(ChainlinkBase.AAVE_SVR_ETH__USD).latestAnswer()
+    );
+    assertEq(AaveV3Base.ORACLE.getAssetPrice(assets[0]), (basePrice * lastGoodRatio) / 1e18);
+    (, int256 answer, , uint256 heldUpdatedAt, ) = adapter.latestRoundData();
+    assertEq(uint256(answer), AaveV3Base.ORACLE.getAssetPrice(assets[0]));
+    assertEq(heldUpdatedAt, lastGoodTimestamp);
+  }
+
+  function test_v3NoLastGoodRatio() public {
+    BoundedRatioAdapterMock adapter = _deploy(
+      ChainlinkBase.AAVE_SVR_ETH__USD,
+      ChainlinkBase.AAVE_SVR_WEETH__EETH_Exchange_Rate,
+      8_75
+    );
+    address[] memory assets = new address[](1);
+    assets[0] = AaveV3BaseAssets.weETH_UNDERLYING;
+    address[] memory sources = new address[](1);
+    sources[0] = address(adapter);
+    vm.prank(AaveV3Base.ACL_ADMIN);
+    AaveV3Base.ORACLE.setAssetSources(assets, sources);
+
+    vm.mockCallRevert(
+      ChainlinkBase.AAVE_SVR_WEETH__EETH_Exchange_Rate,
+      IChainlinkAggregator.latestAnswer.selector,
+      ''
+    );
     assertEq(adapter.latestAnswer(), 0);
     vm.expectRevert();
     AaveV3Base.ORACLE.getAssetPrice(assets[0]);
@@ -135,11 +167,28 @@ contract BoundedRatioAdapterBaseForkTest is Test {
     assertEq(MAG7_SPOKE_ORACLE.getReservePrice(AAPLc_RESERVE_ID), (uint256(rawPrice) * 9) / 10);
 
     skip(3 days);
-    vm.expectRevert(abi.encodeWithSelector(IAaveV4Oracle.InvalidPrice.selector, AAPLc_RESERVE_ID));
-    MAG7_SPOKE_ORACLE.getReservePrice(AAPLc_RESERVE_ID);
+    assertEq(MAG7_SPOKE_ORACLE.getReservePrice(AAPLc_RESERVE_ID), uint256(rawPrice));
+    assertTrue(adapter.isHeld());
+    assertGe(adapter.getLastGoodRatioAge(), 3 days);
 
     vm.prank(boundsAgent);
     adapter.setLowerBound(uint104(uint256(rawPrice) * 9) / 10, uint48(block.timestamp + 3 days));
     assertEq(MAG7_SPOKE_ORACLE.getReservePrice(AAPLc_RESERVE_ID), (uint256(rawPrice) * 9) / 10);
+  }
+
+  function test_v4NoLastGoodRatio() public {
+    BoundedRatioAdapterMock adapter = _deploy(address(0), MAG7_SPOKE_AAPLc_PRICE_FEED, 50_00);
+    int256 rawPrice = IChainlinkAggregator(MAG7_SPOKE_AAPLc_PRICE_FEED).latestAnswer();
+    vm.prank(MAG7_SPOKE);
+    MAG7_SPOKE_ORACLE.setReserveSource(AAPLc_RESERVE_ID, address(adapter));
+
+    vm.mockCallRevert(MAG7_SPOKE_AAPLc_PRICE_FEED, IChainlinkAggregator.latestAnswer.selector, '');
+    vm.expectRevert(abi.encodeWithSelector(IAaveV4Oracle.InvalidPrice.selector, AAPLc_RESERVE_ID));
+    MAG7_SPOKE_ORACLE.getReservePrice(AAPLc_RESERVE_ID);
+
+    vm.clearMockedCalls();
+    adapter.recordRatio();
+    vm.mockCallRevert(MAG7_SPOKE_AAPLc_PRICE_FEED, IChainlinkAggregator.latestAnswer.selector, '');
+    assertEq(MAG7_SPOKE_ORACLE.getReservePrice(AAPLc_RESERVE_ID), uint256(rawPrice));
   }
 }
