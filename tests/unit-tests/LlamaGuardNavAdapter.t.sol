@@ -23,6 +23,7 @@ contract LlamaGuardNavAdapterTest is Test {
   uint104 public constant SNAPSHOT_NAV = 11.2e6;
   uint16 public constant MAX_YEARLY_GROWTH = 5_00;
   uint48 public constant MAX_LOWER_BOUND_DURATION = 3 days;
+  uint48 public constant MAX_NAV_AGE = 4 days;
 
   function setUp() public {
     skip(365 days);
@@ -39,6 +40,14 @@ contract LlamaGuardNavAdapterTest is Test {
     address oracle,
     uint104 snapshotRatio
   ) internal view returns (LlamaGuardNavAdapter.LlamaGuardNavAdapterParams memory) {
+    return _params(oracle, snapshotRatio, MAX_NAV_AGE);
+  }
+
+  function _params(
+    address oracle,
+    uint104 snapshotRatio,
+    uint48 maxNavAge
+  ) internal view returns (LlamaGuardNavAdapter.LlamaGuardNavAdapterParams memory) {
     return
       LlamaGuardNavAdapter.LlamaGuardNavAdapterParams({
         aclManager: IACLManager(address(aclManager)),
@@ -46,6 +55,7 @@ contract LlamaGuardNavAdapterTest is Test {
         pairDescription: 'USTB / USD',
         minimumSnapshotDelay: 7 days,
         maximumLowerBoundDuration: MAX_LOWER_BOUND_DURATION,
+        maxNavAge: maxNavAge,
         priceCapParams: IPriceCapAdapter.PriceCapUpdateParams({
           snapshotRatio: snapshotRatio,
           snapshotTimestamp: uint48(block.timestamp - 30 days),
@@ -64,6 +74,7 @@ contract LlamaGuardNavAdapterTest is Test {
     assertEq(address(adapter.BASE_TO_USD_AGGREGATOR()), address(0));
     assertEq(address(adapter.ACL_MANAGER()), address(aclManager));
     assertEq(adapter.RATIO_DECIMALS(), 6);
+    assertEq(adapter.MAX_NAV_AGE(), MAX_NAV_AGE);
     assertEq(adapter.decimals(), 8);
     assertEq(adapter.description(), 'USTB / USD');
     assertEq(adapter.getRatio(), NAV);
@@ -95,6 +106,10 @@ contract LlamaGuardNavAdapterTest is Test {
 
     vm.expectRevert();
     new LlamaGuardNavAdapter(_params(address(aclManager), SNAPSHOT_NAV));
+
+    navOracle.setDecimals(6);
+    vm.expectRevert(LlamaGuardNavAdapter.InvalidMaxNavAge.selector);
+    new LlamaGuardNavAdapter(_params(address(navOracle), SNAPSHOT_NAV, 0));
   }
 
   function test_decimalsScaling() public {
@@ -167,8 +182,11 @@ contract LlamaGuardNavAdapterTest is Test {
     navOracle.setAnswer(0);
     assertEq(adapter.latestAnswer(), 11.2e8);
     navOracle.setAnswer(-1);
-    assertEq(adapter.latestAnswer(), 11.2e8);
+    assertEq(adapter.getRatio(), 0);
     assertTrue(adapter.isBreached());
+    (, int256 answer, , uint256 updatedAt, ) = adapter.latestRoundData();
+    assertEq(answer, 11.2e8);
+    assertEq(updatedAt, 0);
 
     skip(1 days);
     assertEq(adapter.latestAnswer(), 0);
@@ -211,7 +229,49 @@ contract LlamaGuardNavAdapterTest is Test {
     );
     assertEq(adapter.latestAnswer(), 11.2e8);
     (, , , updatedAt, ) = adapter.latestRoundData();
-    assertEq(updatedAt, block.timestamp);
+    assertEq(updatedAt, 0);
+  }
+
+  function test_staleNavUsesLowerBound() public {
+    navOracle.setAnswer(NAV);
+    skip(MAX_NAV_AGE - 1 days);
+    vm.prank(riskAdmin);
+    adapter.setLowerBound(11.2e6, uint48(block.timestamp + MAX_LOWER_BOUND_DURATION));
+    skip(1 days);
+    assertEq(adapter.latestAnswer(), NAV * 100);
+    assertFalse(adapter.isBreached());
+
+    skip(1);
+    assertEq(adapter.getRatio(), 0);
+    assertEq(adapter.latestAnswer(), 11.2e8);
+    assertTrue(adapter.isBreached());
+    (, , , uint256 updatedAt, ) = adapter.latestRoundData();
+    assertEq(updatedAt, 0);
+
+    vm.startPrank(riskAdmin);
+    vm.expectRevert(
+      abi.encodeWithSelector(IBoundedRatioAdapter.InvalidLowerBound.selector, 11.21e6)
+    );
+    adapter.setLowerBound(11.21e6, uint48(block.timestamp + 1 days));
+    adapter.setLowerBound(11.2e6, uint48(block.timestamp + 1 days));
+    vm.stopPrank();
+
+    skip(1 days);
+    assertEq(adapter.latestAnswer(), 0);
+
+    navOracle.setAnswer(NAV);
+    assertEq(adapter.latestAnswer(), NAV * 100);
+  }
+
+  function test_futureNavRoundIgnored() public {
+    vm.mockCall(
+      address(navOracle),
+      ILlamaGuardOracle.latestRoundData.selector,
+      abi.encode(uint80(1), NAV, block.timestamp + 1, block.timestamp + 1, uint80(1))
+    );
+    assertEq(adapter.getRatio(), 0);
+    assertEq(adapter.latestAnswer(), 0);
+    assertTrue(adapter.isBreached());
   }
 
   function testFuzz_answerWithinBounds(int256 nav, uint256 lowerBound, uint256 elapsed) public {
@@ -223,11 +283,11 @@ contract LlamaGuardNavAdapterTest is Test {
 
     uint256 lowerNow = adapter.getActiveLowerBound();
     uint256 upperNow = adapter.getMaxRatio();
-    uint256 expected = nav > 0 ? uint256(nav) : 0;
-    if (expected < lowerNow) expected = lowerNow;
+    uint256 raw = nav > 0 && elapsed <= MAX_NAV_AGE ? uint256(nav) : 0;
+    uint256 expected = raw < lowerNow ? lowerNow : raw;
     if (expected > upperNow) expected = upperNow;
 
     assertEq(uint256(adapter.latestAnswer()), expected * 100);
-    assertEq(adapter.isBreached(), nav <= 0 || uint256(nav) < lowerNow || uint256(nav) > upperNow);
+    assertEq(adapter.isBreached(), raw == 0 || raw < lowerNow || raw > upperNow);
   }
 }

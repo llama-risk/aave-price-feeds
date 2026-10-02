@@ -25,6 +25,7 @@ contract LlamaGuardNavAdapterForkTest is Test {
 
   uint16 public constant MAX_YEARLY_GROWTH = 5_00;
   uint48 public constant MAX_LOWER_BOUND_DURATION = 5 days;
+  uint48 public constant MAX_NAV_AGE = 4 days;
   uint256 public constant LOWER_BOUND_DISCOUNT_BPS = 15;
 
   address public boundsAgent = makeAddr('boundsAgent');
@@ -49,6 +50,7 @@ contract LlamaGuardNavAdapterForkTest is Test {
           pairDescription: 'USTB / USD',
           minimumSnapshotDelay: minimumSnapshotDelay,
           maximumLowerBoundDuration: MAX_LOWER_BOUND_DURATION,
+          maxNavAge: MAX_NAV_AGE,
           priceCapParams: IPriceCapAdapter.PriceCapUpdateParams({
             snapshotRatio: snapshotRatio,
             snapshotTimestamp: snapshotTimestamp,
@@ -112,6 +114,24 @@ contract LlamaGuardNavAdapterForkTest is Test {
 
     skip(MAX_LOWER_BOUND_DURATION);
     assertEq(adapter.latestAnswer(), 0);
+    vm.expectRevert();
+    AaveV3EthereumHorizon.ORACLE.getAssetPrice(assets[0]);
+  }
+
+  function test_staleNav() public {
+    LlamaGuardNavAdapter adapter = _deployFromRecentRound();
+    (, int256 nav, , uint256 navUpdatedAt, ) = USTB_NAV_ORACLE.latestRoundData();
+    _setLowerBound(adapter, uint256(nav));
+
+    vm.warp(navUpdatedAt + MAX_NAV_AGE + 1);
+    assertEq(adapter.getRatio(), 0);
+    assertTrue(adapter.isBreached());
+    (, int256 answer, , uint256 updatedAt, ) = adapter.latestRoundData();
+    assertEq(answer, int256(adapter.getActiveLowerBound()) * 100);
+    assertEq(updatedAt, 0);
+
+    skip(MAX_LOWER_BOUND_DURATION);
+    assertEq(adapter.latestAnswer(), 0);
   }
 
   function test_v4PriceFeed() public {
@@ -135,6 +155,11 @@ contract LlamaGuardNavAdapterForkTest is Test {
     assertTrue(adapter.isFloored());
 
     skip(MAX_LOWER_BOUND_DURATION);
+    vm.mockCall(
+      address(USTB_NAV_ORACLE),
+      ILlamaGuardOracle.latestRoundData.selector,
+      abi.encode(uint80(0), nav / 2, 0, block.timestamp, uint80(0))
+    );
     assertEq(MAIN_SPOKE_ORACLE.getReservePrice(0), (uint256(nav) / 2) * 100);
 
     vm.mockCallRevert(address(USTB_NAV_ORACLE), ILlamaGuardOracle.latestRoundData.selector, '');
@@ -142,7 +167,7 @@ contract LlamaGuardNavAdapterForkTest is Test {
     MAIN_SPOKE_ORACLE.getReservePrice(0);
   }
 
-  function test_replayUstbHistory() public {
+  function test_replayBoundedNavHistory() public {
     (uint80 latestRound, , , , ) = USTB_NAV_ORACLE.latestRoundData();
     (, int256 firstNav, , uint256 firstUpdatedAt, ) = USTB_NAV_ORACLE.getRoundData(1);
 

@@ -11,9 +11,16 @@ import {ILlamaGuardOracle} from '../interfaces/ILlamaGuardOracle.sol';
  * @notice Answers in USD with 8 decimals, usable as an Aave v3 asset source and an Aave v4 price feed.
  */
 contract LlamaGuardNavAdapter is BoundedRatioAdapterBase {
+  error InvalidMaxNavAge();
+
+  /**
+   * @notice Maximum age of a NAV round; an older round is treated as no NAV
+   */
+  uint48 public immutable MAX_NAV_AGE;
+
   /**
    * @notice Parameters to create adapter
-   * @dev `navOracle` is a LlamaGuardOracle that answers the NAV in USD
+   * @dev `navOracle` is a LlamaGuardOracle that answers the unbounded NAV in USD
    */
   struct LlamaGuardNavAdapterParams {
     IACLManager aclManager;
@@ -21,6 +28,7 @@ contract LlamaGuardNavAdapter is BoundedRatioAdapterBase {
     string pairDescription;
     uint48 minimumSnapshotDelay;
     uint48 maximumLowerBoundDuration;
+    uint48 maxNavAge;
     PriceCapUpdateParams priceCapParams;
   }
 
@@ -42,24 +50,47 @@ contract LlamaGuardNavAdapter is BoundedRatioAdapterBase {
         priceCapParams: params.priceCapParams
       })
     )
-  {}
+  {
+    if (params.maxNavAge == 0) {
+      revert InvalidMaxNavAge();
+    }
+    MAX_NAV_AGE = params.maxNavAge;
+  }
 
   /// @inheritdoc IPriceCapAdapter
+  /// @dev 0 when the round is invalid or older than `MAX_NAV_AGE`
   function getRatio() public view override returns (int256) {
-    (, int256 answer, , , ) = ILlamaGuardOracle(RATIO_PROVIDER).latestRoundData();
+    (int256 answer, ) = _getNav();
     return answer;
   }
 
-  /// @dev 0 when the oracle reverts or returns malformed data
+  /// @dev 0 when `getRatio` is 0, so a lower bound serving in place of the NAV reports 0
   function _getRatioUpdatedAt() internal view override returns (uint256) {
+    (, uint256 updatedAt) = _getNav();
+    return updatedAt;
+  }
+
+  function _getNav() internal view returns (int256, uint256) {
     (bool success, bytes memory data) = RATIO_PROVIDER.staticcall(
       abi.encodeCall(ILlamaGuardOracle.latestRoundData, ())
     );
     if (!success || data.length != 160) {
-      return 0;
+      return (0, 0);
     }
-    (, , , uint256 updatedAt, ) = abi.decode(data, (uint256, uint256, uint256, uint256, uint256));
-    return updatedAt;
+    (uint256 roundId, int256 answer, , uint256 updatedAt, uint256 answeredInRound) = abi.decode(
+      data,
+      (uint256, int256, uint256, uint256, uint256)
+    );
+    if (
+      roundId > type(uint80).max ||
+      answeredInRound > type(uint80).max ||
+      answer <= 0 ||
+      updatedAt > block.timestamp ||
+      block.timestamp - updatedAt > MAX_NAV_AGE
+    ) {
+      return (0, 0);
+    }
+    return (answer, updatedAt);
   }
 
   function _navDecimals(address navOracle) private view returns (uint8) {

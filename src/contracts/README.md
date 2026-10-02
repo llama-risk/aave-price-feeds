@@ -125,7 +125,13 @@ price      = basePrice × ratio (or ratio alone without a base feed), 8 decimals
 
 ### LlamaGuardNavAdapter
 
-`BoundedRatioAdapterBase` without a base feed. The ratio is the NAV in USD from a `LlamaGuardOracle` (`latestRoundData().answer`), scaled to 8 decimals. The same contract is an Aave v3 asset source and an Aave v4 `IPriceFeed`. `updatedAt` is the timestamp of the latest LlamaGuardOracle round.
+`BoundedRatioAdapterBase` without a base feed. The ratio is the NAV in USD from a `LlamaGuardOracle` (`latestRoundData().answer`), scaled to 8 decimals. The same contract is an Aave v3 asset source and an Aave v4 `IPriceFeed`.
+
+- The source oracle must store the unbounded NAV. If the workflow writes a NAV that it already clamped, a NAV move outside its bounds is not visible, and `isBreached` cannot detect it.
+- A round older than `MAX_NAV_AGE`, a round in the future, a reverting oracle, malformed data, or an answer of 0 or less gives a ratio of 0. The active lower bound then sets the price.
+- `updatedAt` is the timestamp of the NAV round, and 0 when the lower bound sets the price because the NAV is invalid.
+- `RATIO_PROVIDER` is immutable. If the workflow writes to a different oracle, deploy a new adapter.
+- Bounds are set by the risk or pool admins of the `ACL_MANAGER`, also when the adapter is an Aave v4 price feed.
 
 ---
 
