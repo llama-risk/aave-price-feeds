@@ -141,10 +141,11 @@ The snapshot is the last accepted multiplier. A drop is priced at the raw multip
 
 ### Registry Failure
 
-- With an active lower bound, the ratio is that bound, capped by the snapshot and the last good multiplier.
-- Otherwise the price holds the last good multiplier, capped by the current upper bound, and `isHeld` is true. Without a last good multiplier the answer is 0.
+- The price holds the last good multiplier, capped by the current upper bound, and `isHeld` is true. An active lower bound does not change the held value.
+- Before the first record, an active lower bound applies, capped by the snapshot, with `updatedAt` 0. Without one the answer is 0.
 - `getLowerBoundLimit` is the snapshot, or the last good multiplier if it is lower.
-- The registry has no timestamp, so the last good multiplier is recorded with the block timestamp. While held, `updatedAt` is the older of that timestamp and the base feed timestamp.
+- The registry has no timestamp, so the last good multiplier is recorded with the block timestamp. While the registry fails, `updatedAt` is the older of that timestamp and the base feed timestamp.
+- Nothing records automatically. A multiplier drop is held only after `recordRatio` runs (it is permissionless). Until then, the hold uses the last recorded multiplier, which can be above the dropped one. A drop below the snapshot and a registry failure both set `isBreached`, so the pause agent pauses the reserve. A drop inside the window can be overpriced by at most the upper bound over the snapshot. Run `recordRatio` after every multiplier change.
 
 ### Cap Updates
 

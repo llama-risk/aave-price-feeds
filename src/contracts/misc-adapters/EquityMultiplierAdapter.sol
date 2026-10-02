@@ -14,7 +14,8 @@ import {BoundedRatioAdapterBase} from '../BoundedRatioAdapterBase.sol';
  * @notice The multiplier is capped by a slowly growing upper bound. A multiplier below the last accepted one,
  * @notice above the upper bound, or flagged by the issuer is reported as a breach. Larger moves of the accepted
  * @notice multiplier are possible only while the v4 reserve is paused. If the registry fails, the price holds
- * @notice the last good multiplier, capped by the upper bound.
+ * @notice the last recorded multiplier, capped by the upper bound. A multiplier drop is held only after
+ * @notice `recordRatio` runs.
  */
 contract EquityMultiplierAdapter is BoundedRatioAdapterBase, IEquityMultiplierAdapter {
   /// @inheritdoc IEquityMultiplierAdapter
@@ -125,20 +126,29 @@ contract EquityMultiplierAdapter is BoundedRatioAdapterBase, IEquityMultiplierAd
     return ratio == 0 || ratio < getSnapshotRatio() || ratio > getMaxRatio() || isIssuerPaused();
   }
 
-  /// @dev The registry has no timestamp: the multiplier is current when it is read
+  /// @dev The registry has no timestamp: a live multiplier is current when read. Without one, the last good record time
   function _getRatioUpdatedAt() internal view override returns (uint256) {
-    return block.timestamp;
+    if (_getRawRatio() != 0) {
+      return block.timestamp;
+    }
+
+    (, uint256 timestamp) = this.getLastGoodRatio();
+    return timestamp;
   }
 
-  /// @dev A live multiplier is priced as is. Without one, the active lower bound applies,
-  /// capped by the snapshot and the last good multiplier
+  /// @dev A live multiplier is priced as is. Without one, the last good multiplier is held. Before the first record,
+  /// the active lower bound applies, capped by the snapshot
   function _getMinRatio(uint256 ratio) internal view override returns (uint256) {
     if (ratio != 0) {
       return 0;
     }
 
-    uint256 lowerBound = getActiveLowerBound();
-    return lowerBound == 0 ? 0 : _min(lowerBound, _getVettedRatio());
+    (uint256 lastGoodRatio, ) = this.getLastGoodRatio();
+    if (lastGoodRatio != 0) {
+      return 0;
+    }
+
+    return _min(getActiveLowerBound(), getSnapshotRatio());
   }
 
   function _getLowerBoundLimit(uint256 ratio) internal view override returns (uint256) {

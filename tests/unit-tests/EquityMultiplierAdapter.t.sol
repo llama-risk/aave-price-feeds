@@ -205,8 +205,9 @@ contract EquityMultiplierAdapterTest is Test {
     assertFalse(adapter.isBreached());
 
     registry.setReverts(true);
-    assertEq(adapter.getBoundedRatio(), MULTIPLIER);
-    assertTrue(adapter.isFloored());
+    assertEq(adapter.getBoundedRatio(), 1.005e18);
+    assertTrue(adapter.isHeld());
+    assertFalse(adapter.isFloored());
     assertTrue(adapter.isBreached());
   }
 
@@ -227,7 +228,11 @@ contract EquityMultiplierAdapterTest is Test {
     vm.prank(riskAdmin);
     adapter.setLowerBound(MULTIPLIER, uint48(block.timestamp + 1 days));
     assertEq(adapter.latestAnswer(), BASE_PRICE);
+    assertFalse(adapter.isHeld());
     assertTrue(adapter.isBreached());
+    (, answer, , updatedAt, ) = adapter.latestRoundData();
+    assertEq(answer, BASE_PRICE);
+    assertEq(updatedAt, 0);
   }
 
   function test_baseFeedFailure() public {
@@ -486,13 +491,17 @@ contract EquityMultiplierAdapterTest is Test {
 
     registry.setMultiplier(token, 0.5e18);
     adapter.recordRatio();
+    uint256 recordedAt = block.timestamp;
 
+    skip(1 hours);
     registry.setReverts(true);
     assertEq(adapter.getLowerBoundLimit(), 0.5e18);
     assertEq(adapter.getBoundedRatio(), 0.5e18);
-    assertFalse(adapter.isHeld());
-    assertTrue(adapter.isFloored());
-    assertEq(adapter.latestAnswer(), BASE_PRICE / 2);
+    assertTrue(adapter.isHeld());
+    assertFalse(adapter.isFloored());
+    (, int256 answer, , uint256 updatedAt, ) = adapter.latestRoundData();
+    assertEq(answer, BASE_PRICE / 2);
+    assertEq(updatedAt, recordedAt);
 
     vm.prank(riskAdmin);
     vm.expectRevert(
@@ -502,7 +511,46 @@ contract EquityMultiplierAdapterTest is Test {
 
     vm.prank(riskAdmin);
     adapter.setLowerBound(0.4e18, uint48(block.timestamp + 1 days));
-    assertEq(adapter.getBoundedRatio(), 0.4e18);
+    assertEq(adapter.getBoundedRatio(), 0.5e18);
+    assertTrue(adapter.isHeld());
+  }
+
+  function test_lowerBoundDoesNotReplaceHeldMultiplier() public {
+    registry.setMultiplier(token, 1.009e18);
+    adapter.recordRatio();
+    uint256 recordedAt = block.timestamp;
+
+    vm.prank(riskAdmin);
+    adapter.setLowerBound(MULTIPLIER, uint48(block.timestamp + 1 days));
+    skip(3 hours);
+    registry.setReverts(true);
+
+    assertEq(adapter.getBoundedRatio(), 1.009e18);
+    assertTrue(adapter.isHeld());
+    (, int256 answer, , uint256 updatedAt, ) = adapter.latestRoundData();
+    assertEq(answer, _price(1.009e18));
+    assertEq(updatedAt, recordedAt);
+  }
+
+  function test_unrecordedDropIsBreachAndRecordedDropIsHeld() public {
+    adapter.recordRatio();
+    skip(1 days);
+    registry.setMultiplier(token, 0.5e18);
+    baseFeed.setLatestAnswer(BASE_PRICE * 2);
+    assertEq(adapter.latestAnswer(), BASE_PRICE);
+    assertTrue(adapter.isBreached());
+
+    registry.setReverts(true);
+    assertTrue(adapter.isHeld());
+    assertEq(adapter.getBoundedRatio(), MULTIPLIER);
+    assertTrue(adapter.isBreached());
+
+    registry.setReverts(false);
+    adapter.recordRatio();
+    registry.setReverts(true);
+    assertTrue(adapter.isHeld());
+    assertEq(adapter.getBoundedRatio(), 0.5e18);
+    assertEq(adapter.latestAnswer(), BASE_PRICE);
   }
 
   function test_lowerBoundLimit() public {
