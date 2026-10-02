@@ -5,6 +5,7 @@ import {Test} from 'forge-std/Test.sol';
 import {AaveV3EthereumHorizon, AaveV3EthereumHorizonAssets} from 'aave-address-book/AaveV3EthereumHorizon.sol';
 
 import {IPriceCapAdapter, IChainlinkAggregator} from '../src/interfaces/IPriceCapAdapter.sol';
+import {IBoundedRatioAdapter} from '../src/interfaces/IBoundedRatioAdapter.sol';
 import {ILlamaGuardOracle} from '../src/interfaces/ILlamaGuardOracle.sol';
 import {LlamaGuardNavAdapter} from '../src/contracts/LlamaGuardNavAdapter.sol';
 
@@ -113,7 +114,16 @@ contract LlamaGuardNavAdapterForkTest is Test {
     assertTrue(adapter.isBreached());
 
     skip(MAX_LOWER_BOUND_DURATION);
-    assertEq(adapter.latestAnswer(), 0);
+    assertEq(AaveV3EthereumHorizon.ORACLE.getAssetPrice(assets[0]), uint256(nav) * 100);
+    assertTrue(adapter.isHeld());
+    (, , , updatedAt, ) = adapter.latestRoundData();
+    assertEq(updatedAt, navUpdatedAt);
+
+    vm.clearMockedCalls();
+    sources[0] = address(_deployFromRecentRound());
+    vm.mockCallRevert(address(USTB_NAV_ORACLE), ILlamaGuardOracle.latestRoundData.selector, '');
+    vm.prank(AaveV3EthereumHorizon.ACL_ADMIN);
+    AaveV3EthereumHorizon.ORACLE.setAssetSources(assets, sources);
     vm.expectRevert();
     AaveV3EthereumHorizon.ORACLE.getAssetPrice(assets[0]);
   }
@@ -129,9 +139,14 @@ contract LlamaGuardNavAdapterForkTest is Test {
     (, int256 answer, , uint256 updatedAt, ) = adapter.latestRoundData();
     assertEq(answer, int256(adapter.getActiveLowerBound()) * 100);
     assertEq(updatedAt, 0);
+    vm.expectRevert(IBoundedRatioAdapter.NoValidRatio.selector);
+    adapter.recordRatio();
 
     skip(MAX_LOWER_BOUND_DURATION);
-    assertEq(adapter.latestAnswer(), 0);
+    (, answer, , updatedAt, ) = adapter.latestRoundData();
+    assertEq(answer, nav * 100);
+    assertEq(updatedAt, navUpdatedAt);
+    assertTrue(adapter.isHeld());
   }
 
   function test_v4PriceFeed() public {
@@ -161,10 +176,19 @@ contract LlamaGuardNavAdapterForkTest is Test {
       abi.encode(uint80(0), nav / 2, 0, block.timestamp, uint80(0))
     );
     assertEq(MAIN_SPOKE_ORACLE.getReservePrice(0), (uint256(nav) / 2) * 100);
+    assertEq(adapter.recordRatio(), uint256(nav) / 2);
 
     vm.mockCallRevert(address(USTB_NAV_ORACLE), ILlamaGuardOracle.latestRoundData.selector, '');
+    assertEq(MAIN_SPOKE_ORACLE.getReservePrice(0), (uint256(nav) / 2) * 100);
+    assertTrue(adapter.isHeld());
+
+    // live NAV is now stale and a new adapter has no last good ratio
+    vm.clearMockedCalls();
+    LlamaGuardNavAdapter unrecorded = _deployFromRecentRound();
+    assertEq(unrecorded.latestAnswer(), 0);
+    vm.prank(MAIN_SPOKE);
     vm.expectRevert(abi.encodeWithSelector(IAaveV4Oracle.InvalidPrice.selector, 0));
-    MAIN_SPOKE_ORACLE.getReservePrice(0);
+    MAIN_SPOKE_ORACLE.setReserveSource(0, address(unrecorded));
   }
 
   function test_replayBoundedNavHistory() public {
@@ -198,5 +222,9 @@ contract LlamaGuardNavAdapterForkTest is Test {
       _setLowerBound(adapter, uint256(nav));
     }
     assertEq(breaches, 0);
+    (, int256 latestNav, , uint256 latestUpdatedAt, ) = USTB_NAV_ORACLE.getRoundData(latestRound);
+    (uint256 lastGood, uint256 lastGoodAt) = adapter.getLastGoodRatio();
+    assertEq(lastGood, uint256(latestNav));
+    assertEq(lastGoodAt, latestUpdatedAt);
   }
 }
