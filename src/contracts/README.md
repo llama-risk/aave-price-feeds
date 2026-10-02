@@ -74,6 +74,57 @@ else return oraclePrice
 
 ---
 
+## BoundedRatioAdapterBase (two-sided bounds)
+
+Abstract base for assets whose ratio can move up and down, such as NAV feeds and equity multipliers.
+
+### How It Works
+
+```text
+upperBound = snapshotRatio + (maxGrowthPerSecond × timeSinceSnapshot)
+lowerBound = published lower bound while now < expiration, 0 after
+ratio      = min(max(currentRatio, lowerBound), upperBound)
+           = min(lastGoodRatio, upperBound) when currentRatio is invalid and no lower bound is active
+price      = basePrice × ratio (or ratio alone without a base feed), 8 decimals
+```
+
+### Parameters
+
+| Parameter                                                           | Description                                                 |
+| ------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `snapshotRatio`, `snapshotTimestamp`, `maxYearlyRatioGrowthPercent` | Upper bound, same rules as `PriceCapAdapterBase`            |
+| `lowerBound`, `expiration`                                          | Set by a risk or pool admin; at most `getLowerBoundLimit()` |
+| `maximumLowerBoundDuration`                                         | Longest time a lower bound can stay active                  |
+
+### Last Good Ratio
+
+- `recordRatio()` (anyone), `setLowerBound` and `setCapParameters` store the current valid ratio, capped by the upper bound, with the ratio source timestamp (the block timestamp if the source has none).
+- `getLastGoodRatio()` returns the stored ratio and timestamp, `getLastGoodRatioAge()` its age, and `isHeld()` tells if the price uses it.
+- Nothing is recorded at deployment. Call `recordRatio()` after deploying.
+
+### Failure Policy
+
+- The ratio provider reverts or returns 0 or less: the active lower bound is used. Without one, the last good ratio is used, capped by the current upper bound. The answer is 0 only if no ratio was ever recorded.
+- A 0 answer makes the v4 `AaveOracle` revert, so health factors and liquidations for the reserve revert until the source recovers, a lower bound is set, or the source is replaced.
+- While the ratio is invalid, a new lower bound can be at most the last stored one, so an expired bound can be set again.
+- A lower bound above the current ratio cannot be renewed, so it expires on schedule.
+- `latestRoundData` reports the older of the ratio (or last good ratio) and base feed timestamps, and 0 when the answer is 0. A held answer keeps its record timestamp, so consumers see it age.
+- The base feed reverts or returns 0 or less: the answer is 0, as in `PriceCapAdapterBase`.
+- The upper bound wins if a cap update moves it below the lower bound or the last good ratio.
+- `isCapped`, `isFloored`, `isBreached` and `isHeld` never revert, so agents can read them. `isBreached` is true while the price is held.
+
+### Hooks for Subclasses
+
+| Hook                                 | Default                                           |
+| ------------------------------------ | ------------------------------------------------- |
+| `getRatio()`, `_getRatioUpdatedAt()` | Required: raw ratio and its timestamp             |
+| `_getMinRatio(rawRatio)`             | Active lower bound                                |
+| `_getLowerBoundLimit(rawRatio)`      | Raw ratio, or the stored lower bound when invalid |
+| `_validateCapParameters(params)`     | No extra checks                                   |
+| `isBreached()` (virtual)             | Invalid ratio or outside the bounds               |
+
+---
+
 ## PendlePriceCapAdapter (PT Tokens)
 
 Adapter for Pendle Principal Tokens using linear discount decay model.
