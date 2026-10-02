@@ -132,13 +132,19 @@ price      = basePrice × ratio (or ratio alone without a base feed), 8 decimals
 ### How It Works
 
 ```text
-lowerBound = max(snapshotRatio, active lower bound)
 upperBound = snapshotRatio + (maxGrowthPerSecond × timeSinceSnapshot)
-ratio      = min(max(multiplier, lowerBound), upperBound)
+ratio      = min(multiplier, upperBound)
 price      = sharePrice × ratio, 8 decimals
 ```
 
-The snapshot is the last accepted multiplier. A multiplier outside the bounds is clamped and `isBreached` returns true, so the pause agent can pause the reserve.
+The snapshot is the last accepted multiplier. A drop is priced at the raw multiplier, never floored. A multiplier below the snapshot, above the upper bound, or flagged as paused by the issuer sets `isBreached`, so the pause agent can pause the reserve.
+
+### Registry Failure
+
+- With an active lower bound, the ratio is that bound, capped by the snapshot and the last good multiplier.
+- Otherwise the price holds the last good multiplier, capped by the current upper bound, and `isHeld` is true. Without a last good multiplier the answer is 0.
+- `getLowerBoundLimit` is the snapshot, or the last good multiplier if it is lower.
+- The registry has no timestamp, so the last good multiplier is recorded with the block timestamp. While held, `updatedAt` is the older of that timestamp and the base feed timestamp.
 
 ### Cap Updates
 
@@ -148,7 +154,7 @@ The snapshot is the last accepted multiplier. A multiplier outside the bounds is
 | Paused                        | Any snapshot (splits, reverse splits)                                                                       |
 | Both                          | `maxYearlyRatioGrowthPercent` at most `MAXIMUM_YEARLY_RATIO_GROWTH_PERCENT`                                 |
 
-If the spoke read fails, the reserve counts as not paused. If the registry read fails, the base rules apply: the active lower bound is used, or the answer is 0.
+If the spoke read fails, the reserve counts as not paused. In normal mode a cap update needs a live multiplier.
 
 ---
 

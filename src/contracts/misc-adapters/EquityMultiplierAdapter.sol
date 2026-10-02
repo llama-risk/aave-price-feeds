@@ -13,7 +13,8 @@ import {BoundedRatioAdapterBase} from '../BoundedRatioAdapterBase.sol';
  * @notice Prices a B20 tokenized equity as (share / USD) x issuer multiplier.
  * @notice The multiplier is capped by a slowly growing upper bound. A multiplier below the last accepted one,
  * @notice above the upper bound, or flagged by the issuer is reported as a breach. Larger moves of the accepted
- * @notice multiplier are possible only while the v4 reserve is paused.
+ * @notice multiplier are possible only while the v4 reserve is paused. If the registry fails, the price holds
+ * @notice the last good multiplier, capped by the upper bound.
  */
 contract EquityMultiplierAdapter is BoundedRatioAdapterBase, IEquityMultiplierAdapter {
   /// @inheritdoc IEquityMultiplierAdapter
@@ -124,23 +125,35 @@ contract EquityMultiplierAdapter is BoundedRatioAdapterBase, IEquityMultiplierAd
     return ratio == 0 || ratio < getSnapshotRatio() || ratio > getMaxRatio() || isIssuerPaused();
   }
 
+  /// @dev The registry has no timestamp: the multiplier is current when it is read
   function _getRatioUpdatedAt() internal view override returns (uint256) {
-    return _getBaseUpdatedAt();
+    return block.timestamp;
   }
 
-  /// @dev A multiplier drop is priced as is, never above the raw multiplier
+  /// @dev A live multiplier is priced as is. Without one, the active lower bound applies,
+  /// capped by the snapshot and the last good multiplier
   function _getMinRatio(uint256 ratio) internal view override returns (uint256) {
     if (ratio != 0) {
       return 0;
     }
 
     uint256 lowerBound = getActiveLowerBound();
-    uint256 snapshotRatio = getSnapshotRatio();
-    return lowerBound < snapshotRatio ? lowerBound : snapshotRatio;
+    return lowerBound == 0 ? 0 : _min(lowerBound, _getVettedRatio());
   }
 
   function _getLowerBoundLimit(uint256 ratio) internal view override returns (uint256) {
-    return ratio == 0 ? getSnapshotRatio() : ratio;
+    return ratio == 0 ? _getVettedRatio() : ratio;
+  }
+
+  /// @dev The snapshot, or the last good multiplier if it is lower
+  function _getVettedRatio() internal view returns (uint256) {
+    (uint256 lastGoodRatio, ) = this.getLastGoodRatio();
+    uint256 snapshotRatio = getSnapshotRatio();
+    return lastGoodRatio == 0 ? snapshotRatio : _min(lastGoodRatio, snapshotRatio);
+  }
+
+  function _min(uint256 a, uint256 b) internal pure returns (uint256) {
+    return a < b ? a : b;
   }
 
   function _validateCapParameters(

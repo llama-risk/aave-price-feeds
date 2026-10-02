@@ -421,6 +421,138 @@ contract EquityMultiplierAdapterTest is Test {
     assertEq(adapter.getSnapshotRatio(), 2e18);
   }
 
+  function test_recordRatioUsesBlockTimestamp() public {
+    registry.setMultiplier(token, 1.005e18);
+    vm.expectEmit(address(adapter));
+    emit IBoundedRatioAdapter.LastGoodRatioRecorded(1.005e18, block.timestamp);
+    assertEq(adapter.recordRatio(), 1.005e18);
+
+    (uint256 ratio, uint256 timestamp) = adapter.getLastGoodRatio();
+    assertEq(ratio, 1.005e18);
+    assertEq(timestamp, block.timestamp);
+
+    registry.setMultiplier(token, 0.5e18);
+    skip(1 hours);
+    assertEq(adapter.recordRatio(), 0.5e18);
+    assertEq(adapter.getLastGoodRatioAge(), 0);
+
+    registry.setReverts(true);
+    vm.expectRevert(IBoundedRatioAdapter.NoValidRatio.selector);
+    adapter.recordRatio();
+  }
+
+  function test_registryFailureHoldsLastGoodMultiplier() public {
+    registry.setMultiplier(token, 1.005e18);
+    adapter.recordRatio();
+    uint256 recordedAt = block.timestamp;
+
+    skip(2 hours);
+    registry.setReverts(true);
+    assertEq(adapter.getBoundedRatio(), 1.005e18);
+    assertTrue(adapter.isHeld());
+    assertFalse(adapter.isFloored());
+    assertTrue(adapter.isBreached());
+    assertEq(adapter.getLastGoodRatioAge(), 2 hours);
+
+    (, int256 answer, , uint256 updatedAt, ) = adapter.latestRoundData();
+    assertEq(answer, _price(1.005e18));
+    assertEq(updatedAt, recordedAt);
+
+    registry.setReverts(false);
+    assertFalse(adapter.isHeld());
+    assertEq(adapter.getBoundedRatio(), 1.005e18);
+  }
+
+  function test_heldMultiplierCappedByWindowAfterReverseSplit() public {
+    adapter.recordRatio();
+
+    registry.setReverts(true);
+    spoke.setPaused(RESERVE_ID, true);
+    _setCap(0.1e18, block.timestamp - 1 days, YEARLY_GROWTH);
+    baseFeed.setLatestAnswer(BASE_PRICE * 10);
+
+    (uint256 lastGoodRatio, ) = adapter.getLastGoodRatio();
+    assertEq(lastGoodRatio, MULTIPLIER);
+    uint256 maxRatio = adapter.getMaxRatio();
+    assertLt(maxRatio, 0.1001e18);
+    assertEq(adapter.getBoundedRatio(), maxRatio);
+    assertTrue(adapter.isHeld());
+    assertEq(adapter.latestAnswer(), int256((uint256(BASE_PRICE * 10) * maxRatio) / 1e18));
+  }
+
+  function test_lowerBoundCannotLiftHeldDrop() public {
+    vm.prank(riskAdmin);
+    adapter.setLowerBound(MULTIPLIER, uint48(block.timestamp + 7 days));
+
+    registry.setMultiplier(token, 0.5e18);
+    adapter.recordRatio();
+
+    registry.setReverts(true);
+    assertEq(adapter.getLowerBoundLimit(), 0.5e18);
+    assertEq(adapter.getBoundedRatio(), 0.5e18);
+    assertFalse(adapter.isHeld());
+    assertTrue(adapter.isFloored());
+    assertEq(adapter.latestAnswer(), BASE_PRICE / 2);
+
+    vm.prank(riskAdmin);
+    vm.expectRevert(
+      abi.encodeWithSelector(IBoundedRatioAdapter.InvalidLowerBound.selector, 0.5e18 + 1)
+    );
+    adapter.setLowerBound(0.5e18 + 1, uint48(block.timestamp + 1 days));
+
+    vm.prank(riskAdmin);
+    adapter.setLowerBound(0.4e18, uint48(block.timestamp + 1 days));
+    assertEq(adapter.getBoundedRatio(), 0.4e18);
+  }
+
+  function test_lowerBoundLimit() public {
+    assertEq(adapter.getLowerBoundLimit(), MULTIPLIER);
+
+    registry.setMultiplier(token, 1.005e18);
+    assertEq(adapter.getLowerBoundLimit(), 1.005e18);
+
+    registry.setMultiplier(token, 1.05e18);
+    assertEq(adapter.getLowerBoundLimit(), adapter.getMaxRatio());
+
+    registry.setReverts(true);
+    assertEq(adapter.getLowerBoundLimit(), MULTIPLIER);
+
+    registry.setReverts(false);
+    adapter.recordRatio();
+    registry.setReverts(true);
+    assertEq(adapter.getLowerBoundLimit(), MULTIPLIER);
+  }
+
+  function testFuzz_heldMultiplierStaysInWindow(
+    uint256 multiplier,
+    uint256 snapshotRatio,
+    uint256 lowerBound,
+    uint32 elapsed,
+    bool failBeforeCapUpdate
+  ) public {
+    multiplier = bound(multiplier, 1, 10e18);
+    snapshotRatio = bound(snapshotRatio, 1, 10e18);
+    registry.setMultiplier(token, multiplier);
+    adapter.recordRatio();
+
+    if (failBeforeCapUpdate) registry.setReverts(true);
+    spoke.setPaused(RESERVE_ID, true);
+    _setCap(snapshotRatio, block.timestamp - 1 days, YEARLY_GROWTH);
+    registry.setReverts(true);
+    (uint256 lastGoodRatio, ) = adapter.getLastGoodRatio();
+
+    lowerBound = bound(lowerBound, 0, adapter.getLowerBoundLimit());
+    vm.prank(riskAdmin);
+    adapter.setLowerBound(uint104(lowerBound), uint48(block.timestamp + 7 days));
+    skip(elapsed);
+
+    uint256 ratio = adapter.getBoundedRatio();
+    assertGt(ratio, 0);
+    assertLe(ratio, adapter.getMaxRatio());
+    assertLe(ratio, lastGoodRatio);
+    assertTrue(adapter.isBreached());
+  }
+
   function testFuzz_ratioStaysInWindow(uint256 multiplier, uint32 elapsed) public {
     multiplier = bound(multiplier, 1, 1e30);
     skip(elapsed);

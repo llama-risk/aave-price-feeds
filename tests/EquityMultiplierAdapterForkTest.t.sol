@@ -228,4 +228,22 @@ contract EquityMultiplierAdapterForkTest is Test {
       _price(basePrice, liveMultiplier)
     );
   }
+
+  function test_registryFailureHoldsLastGoodMultiplier() public {
+    adapter.recordRatio();
+    uint256 recordedAt = block.timestamp;
+    skip(1 hours);
+
+    vm.mockCallRevert(GOOGLc, abi.encodeWithSelector(B20_MULTIPLIER_SELECTOR), '');
+    assertTrue(adapter.isHeld());
+    assertTrue(adapter.isBreached());
+    assertEq(
+      MAG7_SPOKE_ORACLE.getReservePrice(GOOGLc_RESERVE_ID),
+      _price(basePrice, liveMultiplier)
+    );
+
+    (, , , uint256 updatedAt, ) = adapter.latestRoundData();
+    uint256 baseUpdatedAt = IChainlinkAggregator(MAG7_SPOKE_GOOGLc_PRICE_FEED).latestTimestamp();
+    assertEq(updatedAt, baseUpdatedAt < recordedAt ? baseUpdatedAt : recordedAt);
+  }
 }
