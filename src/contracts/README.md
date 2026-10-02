@@ -125,6 +125,40 @@ price      = basePrice × ratio (or ratio alone without a base feed), 8 decimals
 
 ---
 
+## EquityMultiplierAdapter (B20 tokenized equities)
+
+`BoundedRatioAdapterBase` where the ratio is the issuer multiplier of a B20 token, read from the B20 oracle registry (`getOracleParams(token)`, 18 decimals). The base feed prices the share without the multiplier.
+
+### How It Works
+
+```text
+upperBound = snapshotRatio + (maxGrowthPerSecond × timeSinceSnapshot)
+ratio      = min(multiplier, upperBound)
+price      = sharePrice × ratio, 8 decimals
+```
+
+The snapshot is the last accepted multiplier. A drop is priced at the raw multiplier, never floored. A multiplier below the snapshot, above the upper bound, or flagged as paused by the issuer sets `isBreached`, so the pause agent can pause the reserve.
+
+### Registry Failure
+
+- The price holds the last good multiplier, capped by the current upper bound, and `isHeld` is true. An active lower bound does not change the held value.
+- Before the first record, an active lower bound applies, capped by the snapshot, with `updatedAt` 0. Without one the answer is 0.
+- `getLowerBoundLimit` is the snapshot, or the last good multiplier if it is lower.
+- The registry has no timestamp, so the last good multiplier is recorded with the block timestamp. While the registry fails, `updatedAt` is the older of that timestamp and the base feed timestamp.
+- Nothing records automatically. A multiplier drop is held only after `recordRatio` runs (it is permissionless). Until then, the hold uses the last recorded multiplier, which can be above the dropped one. A drop below the snapshot and a registry failure both set `isBreached`, so the pause agent pauses the reserve. A drop inside the window can be overpriced by at most the upper bound over the snapshot. Run `recordRatio` after every multiplier change.
+
+### Cap Updates
+
+| Reserve state on the v4 spoke | Allowed `setCapParameters`                                                                                  |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Not paused                    | Snapshot between the current snapshot and the live multiplier; the upper bound must not increase right away |
+| Paused                        | Any snapshot (splits, reverse splits)                                                                       |
+| Both                          | `maxYearlyRatioGrowthPercent` at most `MAXIMUM_YEARLY_RATIO_GROWTH_PERCENT`                                 |
+
+If the spoke read fails, the reserve counts as not paused. In normal mode a cap update needs a live multiplier.
+
+---
+
 ## PendlePriceCapAdapter (PT Tokens)
 
 Adapter for Pendle Principal Tokens using linear discount decay model.
