@@ -123,6 +123,10 @@ price      = basePrice × ratio (or ratio alone without a base feed), 8 decimals
 | `_validateCapParameters(params)`     | No extra checks                                   |
 | `isBreached()` (virtual)             | Invalid ratio or outside the bounds               |
 
+### LlamaGuardNavAdapter
+
+`BoundedRatioAdapterBase` without a base feed. The ratio is the NAV in USD from a `LlamaGuardOracle` (`latestRoundData().answer`), scaled to 8 decimals. The same contract is an Aave v3 asset source and an Aave v4 `IPriceFeed`. `updatedAt` is the timestamp of the latest LlamaGuardOracle round.
+
 ---
 
 ## PendlePriceCapAdapter (PT Tokens)
